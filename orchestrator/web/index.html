@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>项目工作台</title>
   <link rel="stylesheet" href="/style.css">
   <script defer src="/app.js"></script>
@@ -14,9 +14,11 @@
     <div class="project-nav">
       <select id="projects" aria-label="当前项目"><option value="">选择项目</option></select>
       <span class="stage" id="stage" hidden></span>
+      <button id="project-memory" class="project-memory" type="button" hidden>项目记忆</button>
     </div>
     <div class="actions">
       <span class="mode"><i></i>本地模拟</span>
+      <button id="theme-toggle" type="button" aria-pressed="false">暗色</button>
       <button id="new-project" type="button">新建项目</button>
       <button id="demo" class="primary" type="button">打开演示</button>
     </div>
@@ -24,7 +26,7 @@
 
   <section id="demo-strip" class="demo-strip" aria-label="演示进度" hidden>
     <div class="demo-header">
-      <div class="demo-heading"><strong>演示进度</strong><span id="demo-status" role="status"></span></div>
+      <div class="demo-heading"><strong>演示进度</strong><span id="demo-status" role="status"></span><span id="demo-round" class="round-label" hidden></span></div>
       <div class="demo-actions">
         <button id="artifacts" type="button" disabled>交付物</button>
         <button id="demo-control" type="button" hidden></button>
@@ -45,6 +47,10 @@
       <header class="panel-heading center-heading">
         <span class="agent-icon deepseek" aria-hidden="true">DS</span>
         <div><h1 id="conversation-title">DeepSeek</h1><p>项目协调</p></div>
+        <div class="panel-controls">
+          <button id="deepseek-persona" class="panel-button" type="button" aria-label="DeepSeek 人设">人设</button>
+          <button id="deepseek-connection" class="panel-button" type="button" aria-label="DeepSeek 接口">API 接口</button>
+        </div>
       </header>
       <div id="conversation" class="messages central-messages" role="log" aria-label="项目对话"></div>
       <div id="demo-choices" class="demo-choices" hidden></div>
@@ -61,9 +67,13 @@
     <header class="panel-heading dock-heading">
       <span class="agent-icon" aria-hidden="true"></span>
       <div><select class="agent-select" aria-label="选择 Agent"></select><p class="agent-role"></p></div>
+      <div class="panel-controls">
+        <button class="panel-button dock-persona" type="button">人设</button>
+        <button class="panel-button dock-connection" type="button">接口</button>
+      </div>
     </header>
     <div class="session-bar"><select class="session-select" aria-label="选择会话"></select><span class="candidate"></span></div>
-    <div class="messages dock-messages" role="log" aria-label="Agent 会话"></div>
+    <div class="messages dock-messages" role="region" aria-label="Agent 历史会话" tabindex="0"></div>
   </template>
 
   <dialog id="create-dialog" aria-labelledby="create-title">
@@ -78,6 +88,16 @@
     </form>
   </dialog>
 
+  <dialog id="connection-dialog" aria-labelledby="connection-title">
+    <form id="connection-form">
+      <h2 id="connection-title">Agent 接口</h2>
+      <p id="connection-status" class="connection-status"></p>
+      <div id="connection-fields" class="connection-fields"></div>
+      <p id="connection-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="close-connection" type="button">关闭</button><button id="save-connection" class="primary" type="submit" disabled>保存配置</button></div>
+    </form>
+  </dialog>
+
   <dialog id="artifact-dialog" class="artifacts-dialog" aria-labelledby="artifact-title">
     <header><h2 id="artifact-title">演示交付物</h2><button id="close-artifacts" type="button">关闭</button></header>
     <div class="artifact-layout">
@@ -88,6 +108,14 @@
         <pre id="artifact-content"></pre>
       </section>
     </div>
+  </dialog>
+
+  <dialog id="context-dialog" class="artifacts-dialog" aria-labelledby="context-title">
+    <header><h2 id="context-title"></h2><button id="close-context" type="button">关闭</button></header>
+    <section class="artifact-preview" aria-label="Markdown 内容">
+      <p id="context-path"></p>
+      <pre id="context-content" tabindex="0"></pre>
+    </section>
   </dialog>
 </body>
 </html>

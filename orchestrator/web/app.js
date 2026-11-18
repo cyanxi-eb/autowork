@@ -4,6 +4,8 @@ const projectSelector = byId("projects");
 const composer = byId("composer");
 const messageInput = byId("message");
 const createDialog = byId("create-dialog");
+const connectionDialog = byId("connection-dialog");
+const contextDialog = byId("context-dialog");
 const compact = matchMedia("(max-width: 880px)");
 const sides = ["left", "right"];
 const defaults = { left: "dsh", right: "codex" };
@@ -12,6 +14,13 @@ const titleByStage = { intake: "需求收集", review: "模拟复核" };
 const demoLabels = { waiting_input: "等待确认", running: "运行中", paused: "已暂停", completed: "已完成", blocked: "已阻塞" };
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const state = { agents: [], projects: [], active: null, layout: {}, mobileSide: null };
+const connectionFields = {
+  base_url: ["API 基础地址", "url", "https://api.deepseek.com"],
+  key_env: ["密钥环境变量名", "text", "DEEPSEEK_API_KEY"],
+  command: ["CLI 命令或可执行文件路径", "text", ""],
+  model: ["模型", "text", "留空使用适配器默认值"],
+  effort: ["思考档位", "text", "留空使用适配器默认值"],
+};
 
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
@@ -38,6 +47,15 @@ function savePreference(key, value) {
   } catch {
     // Settings remain usable for the current page when storage is unavailable.
   }
+}
+
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const button = byId("theme-toggle");
+  button.textContent = dark ? "亮色" : "暗色";
+  button.title = dark ? "切换到亮色" : "切换到暗色";
+  button.setAttribute("aria-pressed", String(dark));
 }
 
 function layoutKey() {
@@ -114,6 +132,7 @@ function renderConversation() {
   const run = state.active?.run;
   composer.hidden = !project || project.demo;
   byId("stage").hidden = !project;
+  byId("project-memory").hidden = !project;
   byId("stage").textContent = run ? state.demo.steps[run.step] ?? "已完成" : titleByStage[project?.stage] ?? "";
   renderMessages(
     byId("conversation"), messagesIn("deepseek"),
@@ -132,15 +151,22 @@ function renderDemo() {
   const status = byId("demo-status");
   status.textContent = demoLabels[run.status];
   status.dataset.status = run.status;
+  const round = run.round ?? (run.step >= 5 ? 2 : 1);
+  const roundLabel = byId("demo-round");
+  roundLabel.hidden = run.step < 3;
+  roundLabel.textContent = `第 ${round} 轮 · rev-${String(round).padStart(2, "0")}`;
   const steps = byId("demo-steps");
-  if (steps.dataset.step !== String(run.step)) {
-    steps.dataset.step = run.step;
+  const progressKey = `${run.step}/${round}`;
+  if (steps.dataset.step !== progressKey) {
+    steps.dataset.step = progressKey;
     steps.replaceChildren(...state.demo.steps.map((label, index) => {
-      const completed = index < run.step;
+      const skipped = round === 1 && run.step > 6 && (index === 5 || index === 6);
+      const completed = index < run.step && !skipped;
       const current = index === run.step;
       const item = node("li", "", completed ? "done" : current ? "current" : "");
-      item.append(node("span", completed ? "✓" : String(index + 1), "step-index"), node("span", label));
+      item.append(node("span", completed ? "✓" : skipped ? "–" : String(index + 1), "step-index"), node("span", label));
       if (current) item.setAttribute("aria-current", "step");
+      if (skipped) item.setAttribute("aria-label", `${label}已跳过`);
       return item;
     }));
     const current = steps.querySelector(".current");
@@ -198,19 +224,60 @@ function renderDock(side) {
   icon.className = `agent-icon ${agent?.id ?? ""}`;
   icon.textContent = agentMarks[config.agent] ?? agent?.name.slice(0, 2).toUpperCase() ?? "";
   panel.querySelector(".agent-role").textContent = agent?.role ?? "";
+  const connection = panel.querySelector(".dock-connection");
+  connection.textContent = config.agent === "deepseek" ? "API 接口" : "CLI 接口";
+  connection.setAttribute("aria-label", `${agent?.name} 接口`);
+  panel.querySelector(".dock-persona").setAttribute("aria-label", `${agent?.name} 人设`);
 
   const allMessages = messagesIn(config.agent);
-  const sessions = new Map(allMessages.map(({ data }) => [data.session_id, data.session_title]));
+  const sessions = new Map();
+  for (const event of allMessages) {
+    const id = event.data.session_id;
+    if (!sessions.has(id)) sessions.set(id, []);
+    sessions.get(id).push(event);
+  }
   const sessionChooser = panel.querySelector(".session-select");
-  sessionChooser.replaceChildren(new Option("跟随最新会话", ""), ...Array.from(sessions).reverse().map(
-    ([id, title]) => new Option(title, id),
+  sessionChooser.replaceChildren(new Option(`全部会话${sessions.size ? ` · ${sessions.size}` : ""}`, ""), ...Array.from(sessions).reverse().map(
+    ([id, events]) => new Option(events[0].data.session_title, id),
   ));
   sessionChooser.value = sessions.has(config.session) ? config.session : "";
-  const selected = sessionChooser.value || allMessages.at(-1)?.data.session_id;
-  const visible = allMessages.filter(({ data }) => data.session_id === selected);
-  panel.querySelector(".candidate").textContent = visible.at(-1)?.data.candidate ?? "";
-  renderMessages(panel.querySelector(".dock-messages"), visible,
-    state.active ? "这个 Agent 暂无会话。" : "选择项目后查看 Agent 会话。");
+  const focus = sessionChooser.value;
+  const visible = focus ? [[focus, sessions.get(focus)]] : [...sessions];
+  panel.querySelector(".candidate").textContent = (focus ? sessions.get(focus).at(-1) : allMessages.at(-1))?.data.candidate ?? "";
+  renderDockHistory(panel.querySelector(".dock-messages"), visible, config.agent, focus, state.active?.disclosures[side]);
+}
+
+function renderDockHistory(container, sessions, agent, focus, disclosures) {
+  const scope = JSON.stringify([state.active?.project.id, agent, focus]);
+  const key = JSON.stringify([scope, sessions.map(([, events]) => events.map(({ seq }) => seq))]);
+  if (container.dataset.historyKey === key) return;
+  const sameScope = container.dataset.historyScope === scope;
+  const scrollTop = sameScope ? container.scrollTop : 0;
+  const follow = !sameScope || container.scrollHeight - scrollTop - container.clientHeight < 30;
+  const wasOpen = new Map(Array.from(container.querySelectorAll("details"), (detail) => [detail.dataset.session, detail.open]));
+  container.dataset.historyScope = scope;
+  container.dataset.historyKey = key;
+  if (!sessions.length) {
+    container.replaceChildren(node("p", state.active ? "这个 Agent 暂无会话。" : "选择项目后查看 Agent 会话。", "empty"));
+    return;
+  }
+  container.replaceChildren(...sessions.map(([id, events], index) => {
+    const { session_title: title, candidate } = events.at(-1).data;
+    const details = node("details", "", "session-record");
+    details.dataset.session = id;
+    const key = `${agent}/${id}`;
+    const latest = index === sessions.length - 1;
+    const openByDefault = follow ? latest : (wasOpen.get(id) ?? false);
+    details.open = disclosures?.get(key) ?? openByDefault;
+    const summary = node("summary", "", "session-summary");
+    summary.append(node("strong", title), node("span", candidate ?? `${events.length} 条`, "candidate"));
+    summary.addEventListener("click", () => disclosures?.set(key, !details.open));
+    const entries = node("div", "", "session-entries");
+    entries.append(...events.map(entry));
+    details.append(summary, entries);
+    return details;
+  }));
+  container.scrollTop = follow && !focus ? container.scrollHeight : scrollTop;
 }
 
 function renderProject() {
@@ -255,7 +322,11 @@ function selectProject(id) {
   const selected = state.projects.find((project) => project.id === id);
   if (state.active?.project.id !== selected?.id) messageInput.value = "";
   if (byId("artifact-dialog").open) byId("artifact-dialog").close();
-  state.active = selected ? { project: selected, messages: [], cursor: 0, artifacts: new Map() } : null;
+  if (contextDialog.open) contextDialog.close();
+  state.active = selected ? {
+    project: selected, messages: [], cursor: 0, artifacts: new Map(),
+    disclosures: { left: new Map(), right: new Map() },
+  } : null;
   state.mobileSide = null;
   const saved = loadPreference(layoutKey(), {});
   for (const side of sides) {
@@ -292,6 +363,8 @@ function setupDock(side) {
     savePreference(layoutKey(), state.layout);
     renderDock(side);
   });
+  panel.querySelector(".dock-connection").addEventListener("click", () => openConnection(state.layout[side].agent));
+  panel.querySelector(".dock-persona").addEventListener("click", () => openPersona(state.layout[side].agent));
   byId(`toggle-${side}`).addEventListener("click", () => {
     if (compact.matches) {
       state.mobileSide = state.mobileSide === side ? null : side;
@@ -301,6 +374,77 @@ function setupDock(side) {
     }
     updateLayout();
   });
+}
+
+function openPersona(agentId) {
+  const agent = state.agents.find((item) => item.id === agentId);
+  if (agent) void openContextDocument(`${agent.name} 人设`, `/api/agents/${agentId}/persona`);
+}
+
+async function openContextDocument(title, url) {
+  const request = {};
+  state.contextRequest = request;
+  byId("context-title").textContent = title;
+  byId("context-path").textContent = "";
+  byId("context-content").textContent = "正在读取…";
+  contextDialog.showModal();
+  try {
+    const data = await api(url);
+    if (state.contextRequest !== request || !contextDialog.open) return;
+    byId("context-path").textContent = data.path;
+    byId("context-content").textContent = data.content;
+  } catch (error) {
+    if (state.contextRequest === request && contextDialog.open) byId("context-content").textContent = error.message;
+  }
+}
+
+async function openConnection(agentId) {
+  const agent = state.agents.find((item) => item.id === agentId);
+  if (!agent) return;
+  const selection = { id: agentId };
+  state.connection = selection;
+  byId("connection-title").textContent = `${agent.name} 接口`;
+  byId("connection-status").textContent = "正在读取配置…";
+  byId("connection-error").hidden = true;
+  byId("connection-fields").replaceChildren();
+  byId("save-connection").disabled = true;
+  connectionDialog.showModal();
+  try {
+    const data = await api(`/api/agents/${agentId}/connection`);
+    if (state.connection === selection) renderConnection(data);
+  } catch (error) {
+    if (state.connection === selection) connectionError(error.message);
+  }
+}
+
+function renderConnection(data) {
+  state.connection.ready = true;
+  const credential = data.key_available ? "已检测到密钥环境变量。" : "尚未检测到密钥环境变量。";
+  byId("connection-status").textContent = `${data.kind === "api" ? `HTTP API · ${credential}` : "本地 CLI。"} 当前运行模拟任务，填写项保存在此工作台。`;
+  byId("connection-fields").replaceChildren(...Object.entries(data.settings).map(([name, value]) => {
+    const [label, type, hint] = connectionFields[name];
+    const group = node("div", "", "connection-field");
+    const caption = node("label", label);
+    const input = document.createElement("input");
+    input.name = name;
+    input.type = type;
+    input.id = `connection-${name}`;
+    input.value = value;
+    input.placeholder = hint;
+    input.required = ["base_url", "key_env", "command"].includes(name);
+    input.maxLength = name === "base_url" || name === "command" ? 1024 : 128;
+    input.spellcheck = false;
+    caption.htmlFor = input.id;
+    group.append(caption, input);
+    return group;
+  }));
+  byId("save-connection").disabled = false;
+}
+
+function connectionError(message) {
+  const error = byId("connection-error");
+  error.textContent = message;
+  error.hidden = false;
 }
 
 function openCreatedProject(project) {
@@ -391,6 +535,35 @@ async function boot() {
     byId("artifact-dialog").showModal();
   });
   byId("close-artifacts").addEventListener("click", () => byId("artifact-dialog").close());
+  byId("deepseek-connection").addEventListener("click", () => openConnection("deepseek"));
+  byId("deepseek-persona").addEventListener("click", () => openPersona("deepseek"));
+  byId("project-memory").addEventListener("click", () => {
+    const project = state.active?.project;
+    if (project) void openContextDocument("项目记忆", `/api/projects/${project.id}/memory`);
+  });
+  byId("close-context").addEventListener("click", () => contextDialog.close());
+  byId("close-connection").addEventListener("click", () => connectionDialog.close());
+  connectionDialog.addEventListener("close", () => {
+    if (!connectionDialog.open) state.connection = null;
+  });
+  byId("connection-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const connection = state.connection;
+    if (!connection?.ready || connection.saving) return;
+    connection.saving = true;
+    const button = byId("save-connection");
+    button.disabled = true;
+    byId("connection-error").hidden = true;
+    try {
+      await api(`/api/agents/${connection.id}/connection`, Object.fromEntries(new FormData(event.currentTarget)));
+      if (state.connection === connection) connectionDialog.close();
+    } catch (error) {
+      if (state.connection === connection) connectionError(error.message);
+    } finally {
+      connection.saving = false;
+      if (state.connection === connection) button.disabled = false;
+    }
+  });
 
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -414,4 +587,10 @@ async function boot() {
   });
 }
 
+applyTheme(loadPreference("workbench.theme", "light"));
+byId("theme-toggle").addEventListener("click", () => {
+  const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(theme);
+  savePreference("workbench.theme", theme);
+});
 boot().catch(() => note("无法连接本机工作台。请确认服务已启动后刷新。"));

@@ -8,6 +8,7 @@ import json
 import sqlite3
 from time import time
 
+from .agent_context import prepare_context
 from .workbench import message
 
 
@@ -25,7 +26,7 @@ class Step(IntEnum):
 STEPS = ("需求确认", "环境勘察", "方案拆解", "初版交付", "独立复核", "返修", "复验", "下一阶段交付")
 POLICIES = {"keep": "保留原记录", "update": "更新原记录"}
 FIRST_VERSION = "rev-01"
-FIXED_VERSION = "rev-02"
+MAX_REPAIRS = 3
 QUESTION = "同一编号再次导入时，遇到内容变更要保留原记录，还是按新内容覆盖？"
 
 
@@ -41,7 +42,11 @@ def artifact(path, title, body):
     return "artifact.created", {"path": path, "title": title, "content": f"# {title}\n\n{body}\n"}
 
 
-def simulate_import(candidate, policy):
+def revision(round_number):
+    return f"rev-{round_number:02d}"
+
+
+def simulate_import(candidate, policy, scenario):
     inserts = {
         "plain": "INSERT INTO devices VALUES (?, ?)",
         "keep": "INSERT INTO devices VALUES (?, ?) ON CONFLICT(device_id) DO NOTHING",
@@ -52,7 +57,12 @@ def simulate_import(candidate, policy):
     with closing(sqlite3.connect(":memory:")) as db:
         definition = "device_id TEXT, name TEXT" if candidate == FIRST_VERSION else "device_id TEXT PRIMARY KEY, name TEXT"
         db.execute(f"CREATE TABLE devices ({definition})")
-        insert = inserts["plain" if candidate == FIRST_VERSION else policy]
+        implementation = policy
+        if candidate == FIRST_VERSION:
+            implementation = "plain"
+        elif candidate == revision(2) and scenario == 2:
+            implementation = "update" if policy == "keep" else "keep"
+        insert = inserts[implementation]
         counts = []
         for content in (initial, initial, revised):
             db.executemany(insert, [(row["device_id"], row["name"]) for row in DictReader(StringIO(content))])
@@ -98,19 +108,24 @@ class Demo:
                     message("deepseek", "user", "做一个 CSV 导入工具。希望同一份文件重复导入时，库里只有一份记录。"),
                     message("deepseek", "deepseek", QUESTION),
                 ], demo=True)
-                self.save(db, project_id, Step.REQUIREMENTS, "waiting_input")
+                db.execute(
+                    "INSERT INTO demo_runs (project_id, step, status, scenario) VALUES (?, ?, ?, 2)",
+                    (project_id, Step.REQUIREMENTS, "waiting_input"),
+                )
+                self.save(db, project_id, Step.REQUIREMENTS, "waiting_input", 1, None)
             self.store.sync_files(project_id)
             return self.store.get_project(project_id)
 
-    def save(self, db, project_id, step, status, policy=None):
+    def save(self, db, project_id, step, status, round_number, policy):
         due = self.clock() + self.delay if status == "running" else None
         db.execute(
-            "INSERT INTO demo_runs (project_id, step, status, policy, due_at) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(project_id) DO UPDATE SET step=excluded.step, status=excluded.status, "
-            "policy=excluded.policy, due_at=excluded.due_at",
-            (project_id, step, status, policy, due),
+            "UPDATE demo_runs SET step = ?, status = ?, policy = ?, due_at = ?, round = ? WHERE project_id = ?",
+            (step, status, policy, due, round_number, project_id),
         )
-        self.store.append(db, project_id, "demo.changed", {"step": step, "status": status, "policy": policy})
+        self.store.append(db, project_id, "demo.changed", {
+            "step": step, "status": status, "policy": policy, "round": round_number,
+            "phase": STEPS[step] if step < len(STEPS) else "交付完成",
+        })
 
     def control(self, project_id, action, policy=None):
         with self.store.write_lock:
@@ -127,15 +142,14 @@ class Demo:
                     self.store.append(db, project_id, "message.added", message("deepseek", "user", POLICIES[policy] + "，继续演示。"))
                     self.store.append(db, project_id, "message.added", message("deepseek", "deepseek", "需求 v1 已确认，交给 DSH 勘察。"))
                     self.store.append(db, project_id, *artifact("requirements/需求定稿-v1.md", "需求定稿 v1", f"以编号识别记录。重复导入时{POLICIES[policy]}。相同文件导入两次后仍为 2 行。"))
-                    self.save(db, project_id, Step.ENVIRONMENT, "running", policy)
+                    self.save(db, project_id, Step.ENVIRONMENT, "running", run["round"], policy)
                 elif action == "pause" and current == "running":
-                    self.save(db, project_id, step, "paused", run["policy"])
+                    self.save(db, project_id, step, "paused", run["round"], run["policy"])
                 elif action == "resume" and current == "paused":
-                    self.save(db, project_id, step, "running", run["policy"])
+                    self.save(db, project_id, step, "running", run["round"], run["policy"])
                 else:
                     raise DemoConflict("当前状态不能执行该操作，工作台会同步最新进度。")
-            if action == "confirm":
-                self.store.sync_files(project_id)
+            self.store.sync_files(project_id)
 
     def tick(self):
         with self.store.write_lock:
@@ -150,15 +164,28 @@ class Demo:
                 project_id = run["project_id"]
                 step = Step(run["step"])
                 policy = run["policy"]
-                entries, blocked = self.perform(db, project_id, step, policy)
+                round_number = run["round"]
+                if step in (Step.REVIEW, Step.VERIFY):
+                    entries, next_step, status, round_number = self.review(step, policy, round_number, run["scenario"])
+                else:
+                    entries, blocked = self.perform(db, project_id, step, policy, round_number)
+                    next_step = step if blocked else step + 1
+                    status = "blocked" if blocked else "completed" if next_step == len(STEPS) else "running"
+                try:
+                    for kind, data in entries:
+                        if kind == "message.added" and (data["author"] == "deepseek" or
+                                (data["author"] == "scheduler" and data["channel"] in ("dsh", "codex"))):
+                            context = prepare_context(self.store, project_id, data["channel"])
+                            data["context"] = context.references()
+                except (OSError, UnicodeError):
+                    entries = [chat("deepseek", "scheduler", "人设或项目记忆暂时无法读取，核对文件后再继续。")]
+                    next_step, status, round_number = step, "blocked", run["round"]
                 for kind, data in entries:
                     self.store.append(db, project_id, kind, data)
-                next_step = step if blocked else step + 1
-                status = "blocked" if blocked else "completed" if next_step == len(STEPS) else "running"
-                self.save(db, project_id, next_step, status, policy)
+                self.save(db, project_id, next_step, status, round_number, policy)
             self.store.sync_files(project_id)
 
-    def perform(self, db, project_id, step, policy):
+    def perform(self, db, project_id, step, policy, round_number):
         if step == Step.ENVIRONMENT:
             return [
                 chat("dsh", "scheduler", "勘察 CSV 样例、唯一键和验收环境。", session="dsh-env", title="环境勘察"),
@@ -177,54 +204,60 @@ class Demo:
             ], False
         if step in (Step.IMPLEMENT, Step.REPAIR):
             repair = step == Step.REPAIR
-            candidate = FIXED_VERSION if repair else FIRST_VERSION
-            session = {"session": "dsh-2" if repair else "dsh-1", "title": "返修交付" if repair else "初版交付", "candidate": candidate}
-            task = "修复 F-01，按编号去重并落实已确认的冲突策略。" if repair else "实现 CSV 导入，交付初版候选。"
-            reply = f"已提交 {candidate}。" + (f"已加编号唯一约束，冲突时{POLICIES[policy]}，等待复验。" if repair else "先实现基本导入，等待独立复核。")
+            candidate = revision(round_number)
+            session = {
+                "session": f"dsh-{round_number}", "title": f"第 {round_number - 1} 轮返修" if repair else "初版交付",
+                "candidate": candidate,
+            }
+            task = "根据上一轮复核意见返修，提交新版本独立复验。" if repair else "实现 CSV 导入，交付初版候选。"
+            reply = f"已提交 {candidate}。" + ("已调整导入处理，等待独立复验。" if repair else "先实现基本导入，等待独立复核。")
             return [chat("dsh", "scheduler", task, **session), chat("dsh", "dsh", reply, **session)], False
-        if step in (Step.REVIEW, Step.VERIFY):
-            return self.review(step, policy)
-        return self.deliver(db, project_id, policy)
+        return self.deliver(db, project_id, policy, revision(round_number))
 
     @staticmethod
-    def review(step, policy):
-        final = step == Step.VERIFY
-        candidate = FIXED_VERSION if final else FIRST_VERSION
-        result = simulate_import(candidate, policy)
-        session = {"session": "codex-2" if final else "codex-1", "title": "返修复验" if final else "初版审核", "candidate": candidate}
+    def review(step, policy, round_number, scenario):
+        candidate = revision(round_number)
+        result = simulate_import(candidate, policy, scenario)
+        if result["candidate"] != candidate or result["policy"] != policy:
+            return [chat("deepseek", "scheduler", "本轮复核证据与候选版本或需求策略不一致，已停止推进。")], step, "blocked", round_number
+        session = {"session": f"codex-{round_number}", "title": f"第 {round_number} 轮复核", "candidate": candidate}
         entries = [
             chat("codex", "scheduler", f"复核 {candidate} 的实际导入结果。", **session),
             ("test.completed", result),
             artifact(f"reviews/{candidate}.md", f"复核结果 {candidate}", report(result)),
         ]
-        if final and result["passed"]:
+        if result["passed"]:
             entries += [
                 chat("codex", "codex", "PASS。三个批次均保留 2 行，名称符合已确认的策略。", **session),
                 ("stage.accepted", {"title": "阶段 1 导入实现", "candidate": candidate}),
                 chat("deepseek", "scheduler", f"{candidate} 已通过复验，自动进入阶段 2 整理交付。"),
             ]
-        elif not final and not result["passed"]:
-            entries += [
-                chat("codex", "codex", f"F-01 需返修。重复导入后有 {result['counts'][1]} 行，期望 2 行。", **session),
-                chat("deepseek", "scheduler", "初版验收未通过。已将 F-01 回派给 DSH，下一阶段仍待验收。"),
-            ]
+            return entries, Step.DELIVERY, "running", round_number
+
+        if result["counts"] != [2, 2, 2]:
+            finding = f"F-01 三批导入后的行数为 {result['counts']}，期望各为 2 行。"
         else:
-            entries.append(chat("deepseek", "scheduler", "验收结果与演示预期不符。流程已暂停在当前步骤，可查看复核证据。"))
-        return entries, final != result["passed"]
+            finding = f"F-02 行数已正确，A01 的名称为「{result['name']}」，仍不符合「{POLICIES[policy]}」策略。"
+        entries.append(chat("codex", "codex", finding, **session))
+        if round_number > MAX_REPAIRS:
+            entries.append(chat("deepseek", "scheduler", f"已达到 {MAX_REPAIRS} 次返修上限。验收阻塞，历轮证据已保留。"))
+            return entries, step, "blocked", round_number
+        entries.append(chat("deepseek", "scheduler", f"{candidate} 未通过复核，已将问题回派 DSH。下一候选为 {revision(round_number + 1)}。"))
+        return entries, Step.REPAIR, "running", round_number + 1
 
     @staticmethod
-    def deliver(db, project_id, policy):
+    def deliver(db, project_id, policy, candidate):
         row = db.execute(
             "SELECT data FROM events WHERE project_id = ? AND kind = 'test.completed' ORDER BY seq DESC LIMIT 1",
             (project_id,),
         ).fetchone()
         result = json.loads(row["data"]) if row else {}
-        if not (result.get("passed") and result.get("candidate") == FIXED_VERSION and result.get("policy") == policy):
+        if not (result.get("passed") and result.get("candidate") == candidate and result.get("policy") == policy):
             return [chat("deepseek", "scheduler", "缺少与本次候选版本绑定的通过证据，交付已阻塞。")], True
         return [
-            chat("dsh", "scheduler", "整理已通过复验的候选版本、需求与测试证据。", session="dsh-delivery", title="阶段 2 交付", candidate=FIXED_VERSION),
-            chat("dsh", "dsh", "交付摘要已生成，关联需求、方案、审核和验收结果。", session="dsh-delivery", title="阶段 2 交付", candidate=FIXED_VERSION),
-            artifact("evidence/交付摘要.md", "CSV 导入演示交付摘要", f"需求版本 v1，候选 `{FIXED_VERSION}`。\n\n{report(result)}\n\n复核记录位于 `reviews/{FIXED_VERSION}.md`。"),
-            ("stage.accepted", {"title": "阶段 2 交付整理", "candidate": FIXED_VERSION}),
-            chat("deepseek", "deepseek", "演示完成。可以打开交付物查看两轮复核和最终交付摘要。"),
+            chat("dsh", "scheduler", "整理已通过复验的候选版本、需求与测试证据。", session="dsh-delivery", title="阶段 2 交付", candidate=candidate),
+            chat("dsh", "dsh", "交付摘要已生成，关联需求、方案、审核和验收结果。", session="dsh-delivery", title="阶段 2 交付", candidate=candidate),
+            artifact("evidence/交付摘要.md", "CSV 导入演示交付摘要", f"需求版本 v1，候选 `{candidate}`。\n\n{report(result)}\n\n复核记录位于 `reviews/{candidate}.md`。"),
+            ("stage.accepted", {"title": "阶段 2 交付整理", "candidate": candidate}),
+            chat("deepseek", "deepseek", "演示完成。打开交付物可查看历轮复核和最终交付摘要。"),
         ], False

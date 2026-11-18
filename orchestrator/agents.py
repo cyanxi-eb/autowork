@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from .agent_context import AgentContext
+
 
 @dataclass(frozen=True)
 class AgentInfo:
@@ -22,6 +24,7 @@ class AgentTask:
     task_id: str
     session_id: str
     message: str
+    context: AgentContext
 
 
 class AgentAdapter(Protocol):

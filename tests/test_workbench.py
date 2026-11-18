@@ -30,6 +30,50 @@ def call(url, path, body=None, headers=None):
 
 
 class WorkbenchTest(TestCase):
+    def test_personas_and_project_memories_stay_separate_on_restart(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with running_server(root) as url:
+                roles = {agent: call(url, f"/api/agents/{agent}/persona") for agent in ("deepseek", "dsh", "codex")}
+                self.assertEqual(len({item["content"] for item in roles.values()}), 3)
+                first = call(url, "/api/projects", {"name": "项目甲", "request": "项目甲的独立需求"})
+                second = call(url, "/api/projects", {"name": "项目乙", "request": "项目乙的独立需求"})
+                first_api, second_api = (f"/api/projects/{item['id']}" for item in (first, second))
+                first_memory = call(url, first_api + "/memory")
+                second_memory = call(url, second_api + "/memory")
+                self.assertIn("项目甲的独立需求", first_memory["content"])
+                self.assertNotIn("项目甲的独立需求", second_memory["content"])
+                path = Path(first_memory["path"])
+                original = first_memory["content"]
+                path.write_text(original.replace("## 人工备注", "## 人工备注\n\n甲项目的人工补充"), encoding="utf-8")
+                call(url, first_api + "/messages", {"text": "继续补充验收条件"})
+                events = call(url, first_api + "/events")["events"]
+                self.assertEqual(events[-1]["data"]["context"]["project_id"], first["id"])
+                self.assertNotIn("甲项目的人工补充", call(url, second_api + "/memory")["content"])
+            Path(second_memory["path"]).unlink()
+            with running_server(root) as url:
+                self.assertIn("甲项目的人工补充", call(url, first_api + "/memory")["content"])
+                restored = call(url, second_api + "/memory")
+                self.assertEqual(restored["content"], second_memory["content"])
+
+    def test_connection_settings_are_per_agent_persisted_and_exclude_secrets(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with running_server(root) as url:
+                endpoint = "/api/agents/deepseek/connection"
+                current = call(url, endpoint)
+                self.assertEqual(current["kind"], "api")
+                settings = current["settings"] | {"model": "custom-model", "effort": "high"}
+                self.assertEqual(call(url, endpoint, settings)["settings"], settings)
+                self.assertEqual(call(url, "/api/agents/dsh/connection")["kind"], "cli")
+                for invalid in (settings | {"api_key": "fake-secret"}, settings | {"base_url": "https://example.test/?token=fake"}):
+                    with self.assertRaises(HTTPError) as error:
+                        call(url, endpoint, invalid)
+                    self.assertEqual(error.exception.code, 400)
+                    error.exception.close()
+            with running_server(root) as url:
+                self.assertEqual(call(url, endpoint)["settings"], settings)
+
     def test_creation_input_and_restart_repair(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)

@@ -34,6 +34,11 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $project 'orchestrator')
 foreach ($name in @('index.html', 'app.js', 'style.css')) {
     Copy-Item -LiteralPath (Join-Path $project "orchestrator\web\$name") -Destination $web
 }
+foreach ($agent in @('deepseek', 'dsh', 'codex')) {
+    $persona = Join-Path $backend "personas\$agent"
+    New-Item -ItemType Directory -Path $persona -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $project "orchestrator\personas\$agent\SOUL.md") -Destination $persona
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README-Release.md') -Destination (Join-Path $bundle 'README.md')
 
 $zipName = "AutoWork-$Version-Windows-x64.zip"

@@ -8,7 +8,9 @@ import sqlite3
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
+from .agent_context import persona_path
 from .agents import MockCoordinator
+from .connections import Connections
 from .demo import Demo, DemoConflict, POLICIES, STEPS
 from .store import Store
 from .workbench import Workbench
@@ -20,7 +22,8 @@ ASSETS = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
-PROJECT = re.compile(r"/api/projects/([a-f0-9]{32})(?:/(events|messages|demo))?")
+PROJECT = re.compile(r"/api/projects/([a-f0-9]{32})(?:/(events|messages|demo|memory))?")
+AGENT = re.compile(r"/api/agents/(deepseek|dsh|codex)/(connection|persona)")
 
 
 def required_text(body, key, limit):
@@ -77,14 +80,28 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, snapshot)
             return
         match = PROJECT.fullmatch(path)
-        if match and match[2] in (None, "events"):
+        if match and match[2] in (None, "events", "memory"):
             self.get_project(match[1], match[2], address.query)
+            return
+        match = AGENT.fullmatch(path)
+        if match:
+            if match[2] == "connection":
+                self.json_response(200, self.server.connections.get(match[1]))
+            else:
+                try:
+                    file = persona_path(match[1])
+                    self.json_response(200, {"path": str(file), "content": file.read_text(encoding="utf-8-sig")})
+                except (OSError, UnicodeError):
+                    self.json_response(409, {"error": "人设文件不可读，请检查本地 Markdown 文件。"})
             return
         self.json_response(404, {"error": "找不到此内容。"})
 
     def get_project(self, project_id, resource, query):
         store = self.server.workbench.store
         try:
+            if resource == "memory":
+                self.json_response(200, store.read_memory(project_id))
+                return
             project = store.get_project(project_id)
             if resource is None:
                 self.json_response(200, project)
@@ -97,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, {"events": events, "cursor": cursor})
         except KeyError:
             self.json_response(404, {"error": "项目不存在。"})
+        except (OSError, UnicodeError):
+            self.json_response(409, {"error": "项目记忆不可读，请检查本地 Markdown 文件。"})
         except ValueError:
             self.json_response(400, {"error": "事件游标无效。"})
 
@@ -117,9 +136,12 @@ class Handler(BaseHTTPRequestHandler):
         workbench = self.server.workbench
         path = urlsplit(self.path).path
         match = PROJECT.fullmatch(path)
+        connection = AGENT.fullmatch(path)
         try:
             body = self.read_json()
-            if path == "/api/projects":
+            if connection and connection[2] == "connection":
+                self.json_response(200, self.server.connections.save(connection[1], body))
+            elif path == "/api/projects":
                 project = workbench.create(required_text(body, "name", 80), required_text(body, "request", 8000))
                 self.json_response(201, project)
             elif path == "/api/demo":
@@ -138,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(404, {"error": "项目不存在。"})
         except (json.JSONDecodeError, UnicodeError, TimeoutError):
             self.json_response(400, {"error": "请求内容无效。"})
+        except OSError:
+            self.json_response(409, {"error": "人设或项目记忆不可读，请检查本地 Markdown 文件。"})
         except DemoConflict as error:
             self.json_response(409, {"error": str(error)})
         except ValueError as error:
@@ -157,6 +181,7 @@ def create_server(data_dir, port, *, demo_delay=1.8):
     server = WorkbenchServer(("127.0.0.1", port), Handler)
     server.workbench = Workbench(store, MockCoordinator())
     server.demo = Demo(store, delay=demo_delay)
+    server.connections = Connections(store)
     server.desktop_instance = None
     return server
 

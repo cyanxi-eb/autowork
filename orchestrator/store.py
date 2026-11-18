@@ -7,6 +7,8 @@ import sqlite3
 from threading import RLock
 from uuid import uuid4
 
+from .project_memory import checkpoint, merge_memory
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -33,9 +35,21 @@ class Store:
                 CREATE TABLE IF NOT EXISTS demo_runs (
                     project_id TEXT PRIMARY KEY REFERENCES projects(id),
                     step INTEGER NOT NULL, status TEXT NOT NULL,
-                    policy TEXT, due_at REAL
+                    policy TEXT, due_at REAL,
+                    round INTEGER NOT NULL DEFAULT 1,
+                    scenario INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS agent_connections (
+                    agent_id TEXT PRIMARY KEY, settings TEXT NOT NULL
                 );
             """)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(demo_runs)")}
+            if "round" not in columns:
+                db.execute("ALTER TABLE demo_runs ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
+                db.execute("UPDATE demo_runs SET round = 2 WHERE step >= 5")
+            if "scenario" not in columns:
+                db.execute("ALTER TABLE demo_runs ADD COLUMN scenario INTEGER NOT NULL DEFAULT 1")
         for project in self.list_projects():
             self.sync_files(project["id"])
 
@@ -108,6 +122,20 @@ class Store:
             )
             return [dict(row) | {"data": json.loads(row["data"])} for row in rows]
 
+    def memory_path(self, project_id):
+        path = self.root / "projects" / project_id / "MEMORY.md"
+        if path.resolve() != path:
+            raise OSError("The project memory path must stay within its project directory.")
+        return path
+
+    def read_memory(self, project_id):
+        self.get_project(project_id)
+        path = self.memory_path(project_id)
+        with self.write_lock:
+            if not path.exists():
+                self.sync_files(project_id)
+            return {"path": str(path), "content": path.read_text(encoding="utf-8-sig")}
+
     def sync_files(self, project_id):
         """Rebuild the owned Markdown projection from committed input events."""
         try:
@@ -116,15 +144,16 @@ class Store:
             for subdirectory in ("requirements", "environment", "plan", "stages", "reviews", "evidence", "workspace"):
                 (folder / subdirectory).mkdir(parents=True, exist_ok=True)
             with self.connection() as db:
-                entries = list(db.execute(
+                rows = db.execute(
                     "SELECT kind, occurred_at, data FROM events WHERE project_id = ? "
-                    "AND kind IN ('message.added', 'artifact.created', 'stage.accepted') ORDER BY seq",
+                    "AND kind IN ('message.added', 'artifact.created', 'stage.accepted', 'demo.changed', 'test.completed') ORDER BY seq",
                     (project_id,),
-                ))
+                )
+                entries = [dict(row) | {"data": json.loads(row["data"])} for row in rows]
             lines = [f"# {project['name']} · 需求档案", "", "由工作台按聊天记录生成。", ""]
             progress = ["# 实施进度与续接", ""]
             for entry in entries:
-                data = json.loads(entry["data"])
+                data = entry["data"]
                 if entry["kind"] == "message.added" and data["author"] == "user" and data["channel"] == "deepseek":
                     lines.extend([data["text"], "", "---", ""])
                 elif entry["kind"] == "artifact.created":
@@ -140,7 +169,12 @@ class Store:
                 if len(progress) == 2:
                     progress.append("当前无正式验收记录。")
                 self.write_file(progress_path, "\n".join(progress) + "\n")
-        except OSError:
+            memory = self.memory_path(project_id)
+            current = memory.read_text(encoding="utf-8-sig") if memory.exists() else ""
+            merged = merge_memory(current, checkpoint(project, entries))
+            if merged != current:
+                self.write_file(memory, merged)
+        except (OSError, UnicodeError):
             logging.exception("Project %s Markdown export failed; retry on next input or startup", project_id)
 
     @staticmethod

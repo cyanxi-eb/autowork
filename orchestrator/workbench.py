@@ -1,6 +1,7 @@
 from dataclasses import asdict
 from uuid import uuid4
 
+from .agent_context import prepare_context
 from .agents import AGENTS, AgentAdapter, AgentTask
 
 
@@ -28,9 +29,9 @@ class Workbench:
         return self.store.create_project(name, "intake", messages)
 
     def add_input(self, project_id, text):
-        self.store.get_project(project_id)
-        task = AgentTask(project_id, uuid4().hex, "main", text)
+        context = prepare_context(self.store, project_id, "deepseek")
+        task = AgentTask(project_id, uuid4().hex, "main", text, context)
         self.store.add_messages(project_id, [
             message("deepseek", "user", text),
-            message("deepseek", "deepseek", self.coordinator.respond(task)),
+            message("deepseek", "deepseek", self.coordinator.respond(task)) | {"context": context.references()},
         ])
