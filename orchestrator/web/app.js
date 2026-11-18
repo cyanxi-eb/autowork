@@ -9,6 +9,7 @@ const sides = ["left", "right"];
 const defaults = { left: "dsh", right: "codex" };
 const agentMarks = { deepseek: "DS", dsh: "DSH", codex: "CX" };
 const titleByStage = { intake: "需求收集", review: "模拟复核" };
+const demoLabels = { waiting_input: "等待确认", running: "运行中", paused: "已暂停", completed: "已完成", blocked: "已阻塞" };
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const state = { agents: [], projects: [], active: null, layout: {}, mobileSide: null };
 
@@ -110,14 +111,81 @@ function renderMessages(container, messages, emptyText, heading = "") {
 
 function renderConversation() {
   const project = state.active?.project;
-  composer.hidden = !project;
+  const run = state.active?.run;
+  composer.hidden = !project || project.demo;
   byId("stage").hidden = !project;
-  byId("stage").textContent = project ? titleByStage[project.stage] ?? project.stage : "";
+  byId("stage").textContent = run ? state.demo.steps[run.step] ?? "已完成" : titleByStage[project?.stage] ?? "";
   renderMessages(
     byId("conversation"), messagesIn("deepseek"),
-    project ? "正在读取项目对话。" : "新建项目记录需求，或打开示例查看实施与复核的对照。",
+    project ? "正在读取项目对话。" : "打开演示体验从需求到验收，或新建项目记录自己的需求。",
     project ? "" : "从一个需求开始",
   );
+}
+
+function renderDemo() {
+  const active = state.active;
+  const run = active?.run;
+  byId("demo-strip").hidden = !run;
+  byId("demo-choices").hidden = run?.status !== "waiting_input";
+  if (!run) return;
+
+  const status = byId("demo-status");
+  status.textContent = demoLabels[run.status];
+  status.dataset.status = run.status;
+  const steps = byId("demo-steps");
+  if (steps.dataset.step !== String(run.step)) {
+    steps.dataset.step = run.step;
+    steps.replaceChildren(...state.demo.steps.map((label, index) => {
+      const completed = index < run.step;
+      const current = index === run.step;
+      const item = node("li", "", completed ? "done" : current ? "current" : "");
+      item.append(node("span", completed ? "✓" : String(index + 1), "step-index"), node("span", label));
+      if (current) item.setAttribute("aria-current", "step");
+      return item;
+    }));
+    const current = steps.querySelector(".current");
+    if (current && current.offsetLeft + current.offsetWidth > steps.clientWidth + steps.scrollLeft) {
+      steps.scrollLeft = current.offsetLeft - 12;
+    } else if (run.step === 0) {
+      steps.scrollLeft = 0;
+    }
+  }
+
+  const artifactsButton = byId("artifacts");
+  artifactsButton.textContent = `交付物 ${active.artifacts.size}`;
+  artifactsButton.disabled = active.artifacts.size === 0;
+  const control = byId("demo-control");
+  const controls = { running: ["pause", "暂停"], paused: ["resume", "继续"], completed: ["replay", "再跑一次"], blocked: ["replay", "另开演示"] };
+  const selected = controls[run.status];
+  control.hidden = !selected;
+  if (selected) {
+    [control.dataset.action, control.textContent] = selected;
+    control.disabled = Boolean(active.controlling);
+  }
+  for (const button of byId("demo-choices").querySelectorAll("button")) {
+    button.disabled = Boolean(active.controlling);
+  }
+}
+
+function renderArtifacts() {
+  const active = state.active;
+  if (!active?.artifacts.size) return;
+  const key = active.artifacts.has(active.selectedArtifact) ? active.selectedArtifact : [...active.artifacts.keys()].at(-1);
+  const selected = active.artifacts.get(key);
+  byId("artifact-list").replaceChildren(...Array.from(active.artifacts, ([path, artifact]) => {
+    const button = node("button", artifact.title);
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(path === key));
+    button.addEventListener("click", () => {
+      active.selectedArtifact = path;
+      renderArtifacts();
+      byId("artifact-list").querySelector('[aria-pressed="true"]')?.focus();
+    });
+    return button;
+  }));
+  byId("artifact-name").textContent = selected.title;
+  byId("artifact-path").textContent = selected.path;
+  byId("artifact-content").textContent = selected.content;
 }
 
 function renderDock(side) {
@@ -147,6 +215,7 @@ function renderDock(side) {
 
 function renderProject() {
   renderConversation();
+  renderDemo();
   for (const side of sides) renderDock(side);
 }
 
@@ -160,8 +229,15 @@ async function refreshEvents() {
       data = await api(`/api/projects/${active.project.id}/events?after=${active.cursor}`);
       if (state.active !== active) return;
       active.cursor = data.cursor;
-      active.messages.push(...data.events.filter((event) => event.kind === "message.added"));
-      if (data.events.length) renderProject();
+      for (const event of data.events) {
+        if (event.kind === "message.added") active.messages.push(event);
+        if (event.kind === "demo.changed") active.run = event.data;
+        if (event.kind === "artifact.created") active.artifacts.set(event.data.path, event.data);
+      }
+      if (data.events.length) {
+        renderProject();
+        if (byId("artifact-dialog").open) renderArtifacts();
+      }
     } while (data.events.length === 200);
     if (active.offline) note("");
     active.offline = false;
@@ -178,7 +254,8 @@ async function refreshEvents() {
 function selectProject(id) {
   const selected = state.projects.find((project) => project.id === id);
   if (state.active?.project.id !== selected?.id) messageInput.value = "";
-  state.active = selected ? { project: selected, messages: [], cursor: 0 } : null;
+  if (byId("artifact-dialog").open) byId("artifact-dialog").close();
+  state.active = selected ? { project: selected, messages: [], cursor: 0, artifacts: new Map() } : null;
   state.mobileSide = null;
   const saved = loadPreference(layoutKey(), {});
   for (const side of sides) {
@@ -231,14 +308,45 @@ function openCreatedProject(project) {
   selectProject(project.id);
 }
 
+async function demoAction(action, policy) {
+  const active = state.active;
+  if (!active?.run || active.controlling) return;
+  active.controlling = true;
+  renderDemo();
+  try {
+    if (action === "replay") {
+      const project = await api("/api/demo", { fresh: true });
+      if (state.active === active) openCreatedProject(project);
+    } else {
+      await api(`/api/projects/${active.project.id}/demo`, { action, policy });
+      if (state.active === active) note("");
+    }
+  } catch (error) {
+    if (state.active === active) note(error.message);
+  } finally {
+    active.controlling = false;
+    if (state.active === active) {
+      renderDemo();
+      await refreshEvents();
+    }
+  }
+}
+
 async function boot() {
   const data = await api("/api/workbench");
   state.agents = data.agents;
   state.projects = data.projects;
+  state.demo = data.demo;
+  byId("demo-choices").replaceChildren(...Object.entries(state.demo.policies).map(([policy, label]) => {
+    const button = node("button", label, policy === "keep" ? "primary" : "");
+    button.type = "button";
+    button.addEventListener("click", () => demoAction("confirm", policy));
+    return button;
+  }));
   for (const side of sides) setupDock(side);
   const previous = loadPreference("workbench.active", null);
   selectProject(state.projects.some(({ id }) => id === previous) ? previous : state.projects[0]?.id ?? "");
-  setInterval(refreshEvents, 1800);
+  setInterval(refreshEvents, 750);
   compact.addEventListener("change", updateLayout);
   projectSelector.addEventListener("change", () => selectProject(projectSelector.value));
 
@@ -276,6 +384,13 @@ async function boot() {
       button.disabled = false;
     }
   });
+
+  byId("demo-control").addEventListener("click", (event) => demoAction(event.currentTarget.dataset.action));
+  byId("artifacts").addEventListener("click", () => {
+    renderArtifacts();
+    byId("artifact-dialog").showModal();
+  });
+  byId("close-artifacts").addEventListener("click", () => byId("artifact-dialog").close());
 
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();

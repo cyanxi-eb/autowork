@@ -54,11 +54,17 @@ class WorkbenchTest(TestCase):
         with TemporaryDirectory() as temp, running_server(Path(temp)) as url:
             demo = call(url, "/api/demo", {})
             self.assertEqual(call(url, "/api/demo", {}), demo)
+            demo_endpoint = f"/api/projects/{demo['id']}"
+            self.assertTrue(call(url, demo_endpoint + "/demo", {"action": "confirm", "policy": "update"})["accepted"])
+            with self.assertRaises(HTTPError) as error:
+                call(url, demo_endpoint + "/demo", {"action": "confirm", "policy": "keep"})
+            self.assertEqual(error.exception.code, 409)
+            error.exception.close()
             project = call(url, "/api/projects", {"name": "隔离测试", "request": "新需求"})
             self.assertFalse(project["demo"])
             feeds = [call(url, f"/api/projects/{item['id']}/events")["events"] for item in (demo, project)]
-            demo_sessions = {event["data"].get("session_id") for event in feeds[0]}
-            self.assertTrue({"dsh-1", "dsh-2", "codex-1"} <= demo_sessions)
+            demo_status = [event["data"]["status"] for event in feeds[0] if event["kind"] == "demo.changed"]
+            self.assertEqual(demo_status[:2], ["waiting_input", "running"])
             self.assertEqual({event["data"].get("session_id") for event in feeds[1]}, {None, "main"})
 
     def test_rejects_invalid_input_and_external_origin(self):

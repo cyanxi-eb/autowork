@@ -30,6 +30,11 @@ class Store:
                     kind TEXT NOT NULL, occurred_at TEXT NOT NULL, data TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS events_project_seq ON events(project_id, seq);
+                CREATE TABLE IF NOT EXISTS demo_runs (
+                    project_id TEXT PRIMARY KEY REFERENCES projects(id),
+                    step INTEGER NOT NULL, status TEXT NOT NULL,
+                    policy TEXT, due_at REAL
+                );
             """)
         for project in self.list_projects():
             self.sync_files(project["id"])
@@ -68,21 +73,21 @@ class Store:
             (project_id, kind, timestamp(), json.dumps(data, ensure_ascii=False)),
         )
 
-    def create_project(self, name, stage, messages, *, demo=False):
+    def insert_project(self, db, name, stage, messages, *, demo=False):
+        project_id = uuid4().hex
+        db.execute(
+            "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
+            (project_id, name, stage, int(demo), timestamp()),
+        )
+        self.append(db, project_id, "project.created", {"stage": stage})
+        for message in messages:
+            self.append(db, project_id, "message.added", message)
+        return project_id
+
+    def create_project(self, name, stage, messages):
         with self.write_lock:
             with self.connection() as db:
-                if demo:
-                    existing = db.execute("SELECT * FROM projects WHERE demo = 1 LIMIT 1").fetchone()
-                    if existing is not None:
-                        return self.project_view(existing)
-                project_id = uuid4().hex
-                db.execute(
-                    "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
-                    (project_id, name, stage, int(demo), timestamp()),
-                )
-                self.append(db, project_id, "project.created", {"stage": stage})
-                for message in messages:
-                    self.append(db, project_id, "message.added", message)
+                project_id = self.insert_project(db, name, stage, messages)
             self.sync_files(project_id)
             return self.get_project(project_id)
 
@@ -111,19 +116,30 @@ class Store:
             for subdirectory in ("requirements", "environment", "plan", "stages", "reviews", "evidence", "workspace"):
                 (folder / subdirectory).mkdir(parents=True, exist_ok=True)
             with self.connection() as db:
-                inputs = [json.loads(row[0]) for row in db.execute(
-                    "SELECT data FROM events WHERE project_id = ? AND kind = 'message.added' ORDER BY seq",
+                entries = list(db.execute(
+                    "SELECT kind, occurred_at, data FROM events WHERE project_id = ? "
+                    "AND kind IN ('message.added', 'artifact.created', 'stage.accepted') ORDER BY seq",
                     (project_id,),
-                )]
+                ))
             lines = [f"# {project['name']} · 需求档案", "", "由工作台按聊天记录生成。", ""]
-            for message in inputs:
-                if message["author"] == "user" and message["channel"] == "deepseek":
-                    lines.extend([message["text"], "", "---", ""])
+            progress = ["# 实施进度与续接", ""]
+            for entry in entries:
+                data = json.loads(entry["data"])
+                if entry["kind"] == "message.added" and data["author"] == "user" and data["channel"] == "deepseek":
+                    lines.extend([data["text"], "", "---", ""])
+                elif entry["kind"] == "artifact.created":
+                    target = (folder / data["path"]).resolve()
+                    if target.is_relative_to(folder.resolve()):
+                        self.write_file(target, data["content"])
+                elif entry["kind"] == "stage.accepted":
+                    date = datetime.fromisoformat(entry["occurred_at"]).astimezone().isoformat(timespec="seconds")
+                    progress.append(f"- {date}－{data['title']}已完成（演示，{data['candidate']}）")
             self.write_file(folder / "requirements" / "需求档案.md", "\n".join(lines))
             progress_path = folder / "progress.md"
-            if not progress_path.exists():
-                progress = "# 实施进度与续接\n\n当前无正式验收记录。\n"
-                self.write_file(progress_path, progress)
+            if len(progress) > 2 or not progress_path.exists():
+                if len(progress) == 2:
+                    progress.append("当前无正式验收记录。")
+                self.write_file(progress_path, "\n".join(progress) + "\n")
         except OSError:
             logging.exception("Project %s Markdown export failed; retry on next input or startup", project_id)
 

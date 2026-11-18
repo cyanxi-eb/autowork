@@ -17,10 +17,21 @@
     </div>
     <div class="actions">
       <span class="mode"><i></i>本地模拟</span>
-      <button id="demo" type="button">打开示例</button>
-      <button id="new-project" class="primary" type="button">新建项目</button>
+      <button id="new-project" type="button">新建项目</button>
+      <button id="demo" class="primary" type="button">打开演示</button>
     </div>
   </header>
+
+  <section id="demo-strip" class="demo-strip" aria-label="演示进度" hidden>
+    <div class="demo-header">
+      <div class="demo-heading"><strong>演示进度</strong><span id="demo-status" role="status"></span></div>
+      <div class="demo-actions">
+        <button id="artifacts" type="button" disabled>交付物</button>
+        <button id="demo-control" type="button" hidden></button>
+      </div>
+    </div>
+    <ol id="demo-steps" class="demo-steps" aria-label="闭环步骤"></ol>
+  </section>
 
   <nav class="layout-bar" aria-label="工作台布局">
     <button id="toggle-left" type="button" aria-controls="left-panel" aria-expanded="true"><span aria-hidden="true">◧</span> 左侧面板</button>
@@ -36,6 +47,7 @@
         <div><h1 id="conversation-title">DeepSeek</h1><p>项目协调</p></div>
       </header>
       <div id="conversation" class="messages central-messages" role="log" aria-label="项目对话"></div>
+      <div id="demo-choices" class="demo-choices" hidden></div>
       <form id="composer" class="composer" hidden>
         <label for="message" class="sr-only">补充需求</label>
         <textarea id="message" rows="2" maxlength="8000" required placeholder="补充需求、约束或验收条件…"></textarea>
@@ -64,6 +76,18 @@
       <p id="create-error" role="alert" hidden></p>
       <div class="dialog-actions"><button id="cancel-create" type="button">取消</button><button class="primary" type="submit">创建项目</button></div>
     </form>
+  </dialog>
+
+  <dialog id="artifact-dialog" class="artifacts-dialog" aria-labelledby="artifact-title">
+    <header><h2 id="artifact-title">演示交付物</h2><button id="close-artifacts" type="button">关闭</button></header>
+    <div class="artifact-layout">
+      <nav id="artifact-list" aria-label="交付物列表"></nav>
+      <section class="artifact-preview" aria-labelledby="artifact-name">
+        <h3 id="artifact-name"></h3>
+        <p id="artifact-path"></p>
+        <pre id="artifact-content"></pre>
+      </section>
+    </div>
   </dialog>
 </body>
 </html>

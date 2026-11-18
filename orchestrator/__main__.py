@@ -1,11 +1,15 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 from pathlib import Path
 import re
+import sqlite3
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 from .agents import MockCoordinator
+from .demo import Demo, DemoConflict, POLICIES, STEPS
 from .store import Store
 from .workbench import Workbench
 
@@ -16,7 +20,7 @@ ASSETS = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
-PROJECT = re.compile(r"/api/projects/([a-f0-9]{32})(?:/(events|messages))?")
+PROJECT = re.compile(r"/api/projects/([a-f0-9]{32})(?:/(events|messages|demo))?")
 
 
 def required_text(body, key, limit):
@@ -64,7 +68,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         workbench = self.server.workbench
         if path == "/api/workbench":
-            self.json_response(200, {"mode": "mock", "agents": workbench.agents(), "projects": workbench.store.list_projects()})
+            snapshot = {
+                "mode": "mock", "agents": workbench.agents(), "projects": workbench.store.list_projects(),
+                "demo": {"steps": STEPS, "policies": POLICIES},
+            }
+            if self.server.desktop_instance:
+                snapshot["desktop_instance"] = self.server.desktop_instance
+            self.json_response(200, snapshot)
             return
         match = PROJECT.fullmatch(path)
         if match and match[2] in (None, "events"):
@@ -113,8 +123,13 @@ class Handler(BaseHTTPRequestHandler):
                 project = workbench.create(required_text(body, "name", 80), required_text(body, "request", 8000))
                 self.json_response(201, project)
             elif path == "/api/demo":
-                self.json_response(200, workbench.demo())
+                self.json_response(200, self.server.demo.open(fresh=body.get("fresh") is True))
+            elif match and match[2] == "demo":
+                self.server.demo.control(match[1], required_text(body, "action", 16), body.get("policy"))
+                self.json_response(200, {"accepted": True})
             elif match and match[2] == "messages":
+                if workbench.store.get_project(match[1])["demo"]:
+                    raise DemoConflict("请用演示操作区选择策略或控制运行。")
                 workbench.add_input(match[1], required_text(body, "text", 8000))
                 self.json_response(201, {"accepted": True})
             else:
@@ -123,14 +138,26 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(404, {"error": "项目不存在。"})
         except (json.JSONDecodeError, UnicodeError, TimeoutError):
             self.json_response(400, {"error": "请求内容无效。"})
+        except DemoConflict as error:
+            self.json_response(409, {"error": str(error)})
         except ValueError as error:
             self.json_response(400, {"error": str(error)})
 
 
-def create_server(data_dir, port):
-    workbench = Workbench(Store(data_dir), MockCoordinator())
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    server.workbench = workbench
+class WorkbenchServer(ThreadingHTTPServer):
+    def service_actions(self):
+        try:
+            self.demo.tick()
+        except sqlite3.Error:
+            logging.exception("Could not commit the next demo step")
+
+
+def create_server(data_dir, port, *, demo_delay=1.8):
+    store = Store(data_dir)
+    server = WorkbenchServer(("127.0.0.1", port), Handler)
+    server.workbench = Workbench(store, MockCoordinator())
+    server.demo = Demo(store, delay=demo_delay)
+    server.desktop_instance = None
     return server
 
 
@@ -138,8 +165,16 @@ def main():
     parser = argparse.ArgumentParser(description="启动本机项目工作台")
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).resolve().parent.parent / ".orchestrator")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--desktop", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     with create_server(args.data_dir, args.port) as server:
+        if args.desktop:
+            server.desktop_instance = uuid4().hex
+            endpoint = {
+                "port": server.server_port, "instance": server.desktop_instance,
+                "root": str(Path(__file__).resolve().parent.parent),
+            }
+            Store.write_file(server.workbench.store.root / "desktop-endpoint.json", json.dumps(endpoint))
         print(f"项目工作台  http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()
