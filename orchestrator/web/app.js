@@ -138,7 +138,8 @@ function renderConversation() {
   byId("stage").hidden = !project;
   byId("project-memory").hidden = !project;
   byId("stage").textContent = run ? state.demo.steps[run.step] ?? "已完成"
-    : live ? state.live.phases[live.phase] : titleByStage[project?.stage] ?? "";
+    : live ? (live.status === "completed" ? liveLabels.completed : state.live.phases[live.phase])
+      : titleByStage[project?.stage] ?? "";
   byId("workspace-mode").textContent = project?.demo ? "本地演示" : live ? "Agent 运行" : "本地工作台";
   renderMessages(
     byId("conversation"), messagesIn("deepseek"),
