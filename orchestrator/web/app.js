@@ -254,7 +254,7 @@ function renderLive() {
   launch.hidden = ["queued", "running", "waiting_input"].includes(run?.status);
   launch.textContent = run ? "开始新运行" : "开始运行";
   byId("live-cancel").hidden = run?.status !== "waiting_input";
-  byId("live-retry-review").hidden = run?.status !== "interrupted" || run.phase !== "review" || !run.candidate;
+  byId("live-retry-review").hidden = !["interrupted", "blocked"].includes(run?.status) || run.phase !== "review" || !run.candidate;
   const artifacts = byId("live-artifacts");
   artifacts.disabled = !active.artifacts.size;
   artifacts.textContent = "交付物 " + active.artifacts.size;
@@ -272,15 +272,28 @@ function renderLive() {
   }));
 }
 
-async function openRunDialog() {
+async function openRunDialog(retryReview = false) {
   const active = state.active;
   if (!active || active.project.demo) return;
-  byId("run-form").reset();
-  byId("run-source").value = active.live?.source ?? state.live.default_source;
+  const form = byId("run-form");
+  form.reset();
+  runDialog.dataset.action = retryReview ? "retry_review" : "start";
+  byId("run-title").textContent = retryReview ? "重试独立复核" : "开始项目运行";
+  form.querySelector("button[type=submit]").textContent = retryReview ? "开始复核" : "开始运行";
+  const source = byId("run-source");
+  source.value = active.live?.source ?? state.live.default_source;
+  source.disabled = source.hidden = retryReview;
+  form.querySelector('label[for="run-source"]').hidden = retryReview;
+  byId("run-source-hint").textContent = retryReview
+    ? "针对既有候选 " + active.live.candidate.slice(0, 12) + " 做只读复核。修改验收条件会保留变更记录。"
+    : "以仓库当前 Git 提交创建独立候选副本。执行和返修在副本中进行。";
+  byId("run-local-label").hidden = retryReview;
   byId("run-acceptance").value = active.live?.acceptance ?? "";
   byId("run-error").hidden = true;
+  byId("run-connections").hidden = retryReview;
   byId("run-connections").textContent = "正在检测本机 Agent…";
   runDialog.showModal();
+  if (retryReview) return;
   try {
     const connections = await Promise.all(state.agents.map((agent) => api("/api/agents/" + agent.id + "/connection")));
     if (!runDialog.open || state.active !== active) return;
@@ -627,23 +640,22 @@ async function boot() {
       byId("artifact-dialog").showModal();
     });
   }
-  byId("run-project").addEventListener("click", openRunDialog);
+  byId("run-project").addEventListener("click", () => openRunDialog());
+  byId("live-retry-review").addEventListener("click", () => openRunDialog(true));
   byId("cancel-run").addEventListener("click", () => runDialog.close());
-  for (const [id, action] of [["live-cancel", "cancel_waiting"], ["live-retry-review", "retry_review"]]) {
-    byId(id).addEventListener("click", async (event) => {
-      const active = state.active;
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        await api("/api/projects/" + active.project.id + "/run", { action });
-        if (state.active === active) await refreshEvents();
-      } catch (error) {
-        if (state.active === active) note(error.message);
-      } finally {
-        button.disabled = false;
-      }
-    });
-  }
+  byId("live-cancel").addEventListener("click", async (event) => {
+    const active = state.active;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await api("/api/projects/" + active.project.id + "/run", { action: "cancel_waiting" });
+      if (state.active === active) await refreshEvents();
+    } catch (error) {
+      if (state.active === active) note(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
   byId("run-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const active = state.active;
@@ -652,10 +664,13 @@ async function boot() {
     error.hidden = true;
     button.disabled = true;
     try {
-      const run = await api("/api/projects/" + active.project.id + "/run", {
-        action: "start", source: byId("run-source").value, acceptance: byId("run-acceptance").value,
-        local_coordinator: byId("run-local").checked,
-      });
+      const action = runDialog.dataset.action;
+      const body = { action, acceptance: byId("run-acceptance").value };
+      if (action === "start") {
+        body.source = byId("run-source").value;
+        body.local_coordinator = byId("run-local").checked;
+      }
+      const run = await api("/api/projects/" + active.project.id + "/run", body);
       if (state.active === active) {
         active.live = run;
         runDialog.close();

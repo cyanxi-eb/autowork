@@ -37,7 +37,7 @@ python -m orchestrator
 
 DSH 在默认自动配置下，有 `DEEPSEEK_API_KEY` 时使用 headless profile 的模型设置，未设该变量时通过 DSH 的本机凭据机制使用已登录的桌面账户。也可在「接口」中指定 Provider、模型和思考档位。覆盖只应用于当前 CLI 调用。DeepSeek 项目协调 API 的密钥设置独立于 DSH 登录。
 
-运行数据保存在 SQLite 中。阶段之间可在重启后续接。执行期间发生中断时，工作台保留候选副本并显示「执行待核实」。中断发生在独立复核时，可以针对原候选提交重试只读复核。Agent 的一个工作轮次有独立任务号，最终回复统一使用 JSON v1，必须回填任务号和候选提交。工作台会检查协议和候选状态，业务验收依据仍来自 Codex 的复核。
+运行数据保存在 SQLite 中。阶段之间可在重启后续接。执行期间发生中断时，工作台保留候选副本并显示「执行待核实」。复核中断或阻塞时，可以针对原候选提交重试只读复核，验收条件的修订会留档。Agent 的一个工作轮次有独立任务号，最终回复统一使用 JSON v1，必须回填任务号和候选提交。工作台会检查协议和候选状态，业务验收依据仍来自 Codex 的复核。
 
 ## 怎么演示
 
@@ -76,7 +76,7 @@ DSH 在默认自动配置下，有 `DEEPSEEK_API_KEY` 时使用 headless profile
 
 `GET` 和 `POST /api/agents/{id}/connection` 读取和保存工作台内的 Agent 接入配置。
 
-`POST /api/projects/{id}/run` 启动真实运行、结束等待补充的运行或重试中断的复核。`GET /api/agents/{id}/persona` 查看人设，`GET /api/projects/{id}/memory` 查看项目记忆，`GET /api/projects/{id}/document?path=...` 读取项目档案中的文档。
+`POST /api/projects/{id}/run` 启动真实运行、结束等待补充的运行或重试复核。`GET /api/agents/{id}/persona` 查看人设，`GET /api/projects/{id}/memory` 查看项目记忆，`GET /api/projects/{id}/document?path=...` 读取项目档案中的文档。
 
 `requirements/需求档案.md` 由程序从用户对话生成。SQLite 提交步骤、对话和证据后更新 Markdown，导出中断时可在下次写入或启动时重建。`progress.md` 只在演示阶段实际通过后记录对应时间和候选版本。
 

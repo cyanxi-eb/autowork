@@ -118,8 +118,11 @@ class LiveRunTest(TestCase):
                 live.save(db, prepared, "running", "Review dispatched")
             interrupted = self.advance(live, project)
             self.assertEqual(interrupted["status"], "interrupted")
-            retry = live.retry_review(project)
+            retry = live.retry_review(project, "Revision 2 verified from the fixed commit")
             self.assertEqual((retry["candidate"], retry["round"]), (prepared["candidate"], prepared["round"]))
+            changes = [event["data"] for event in store.events(project) if event["kind"] == "review.acceptance_changed"]
+            self.assertEqual(changes[0]["before"], "Revision 2")
+            self.assertEqual(changes[0]["after"], retry["acceptance"])
             returned = self.advance(live, project)
             self.assertEqual((returned["phase"], returned["round"]), ("repair", 2))
             self.assertEqual(runtimes.calls.count(("implement", None)), 1)

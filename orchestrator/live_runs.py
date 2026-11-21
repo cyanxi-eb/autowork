@@ -19,10 +19,12 @@ PHASES = {
     "coordinate": ("deepseek", "需求确认", "汇总任务范围和验收。只有缺少必要信息时才以 needs_input 提问。不要扩大用户确认的验收范围。"),
     "survey": ("dsh", "环境勘察", "只读检查仓库，找出相关文件、已有约定和测试入口。"),
     "plan": ("codex", "方案拆解", "只读制定小范围实施方案和独立验证方法。"),
-    "implement": ("dsh", "初版实施", "仅在候选副本修改文件。运行相关检查并报告结果。保持改动未提交，AutoWork 会记录提交。"),
+    "implement": ("dsh", "初版实施", "仅在候选副本修改文件。优先用文件工具和相对路径编辑，终端访问受限时也使用文件工具。"
+                  "运行能执行的相关检查并报告结果。保持改动未提交，AutoWork 会记录提交。"),
     "review": ("codex", "独立复核", "独立检查 baseline 到 candidate 的 Git 差异并执行可行的验收检查。逐项报告证据。"
                "只有亲自验证全部必验项时才给 pass。可修复问题给 changes_requested，无法验证给 blocked。"),
-    "repair": ("dsh", "返修", "按最新复核发现逐项修复并验证。保持改动未提交，AutoWork 会记录新候选。"),
+    "repair": ("dsh", "返修", "按最新复核发现逐项修复并验证。优先用文件工具和相对路径编辑。"
+               "保持改动未提交，AutoWork 会记录新候选。"),
 }
 NEXT = {"coordinate": "survey", "survey": "plan", "plan": "implement", "implement": "review", "repair": "review"}
 ACTIVE = {"queued", "running", "waiting_input"}
@@ -107,7 +109,7 @@ class LiveRuns:
         self.store.sync_files(project_id)
         return self.view(run)
 
-    def retry_review(self, project_id):
+    def retry_review(self, project_id, acceptance=None):
         self.store.get_project(project_id)
         connection = self.connections.get("codex")
         if not connection["available"]:
@@ -115,8 +117,13 @@ class LiveRuns:
         with self.store.write_lock, self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             run = self.latest(db, project_id)
-            if not run or run["status"] != "interrupted" or run["phase"] != "review" or not run["candidate"]:
-                raise RunConflict("只有已固定候选且中断的复核可以重试。")
+            if not run or run["status"] not in ("interrupted", "blocked") or run["phase"] != "review" or not run["candidate"]:
+                raise RunConflict("只有已固定候选且停止的复核可以重试。")
+            if acceptance and acceptance != run["acceptance"]:
+                self.store.append(db, project_id, "review.acceptance_changed", {
+                    "run_id": run["id"], "candidate": run["candidate"], "before": run["acceptance"], "after": acceptance,
+                })
+                run["acceptance"] = acceptance
             run["settings"]["codex"] = connection["settings"]
             run["sessions"].pop("review", None)
             self.save(db, run, "queued", "已排入一次只读复核，继续使用原候选提交。")

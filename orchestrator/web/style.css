@@ -172,6 +172,7 @@ dialog textarea { resize: vertical; }
 .artifact-preview pre { margin: 0; font: 12px/1.65 Consolas, "Microsoft YaHei UI", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 #live-steps { grid-template-columns: repeat(5, minmax(105px, 1fr)); }
+#live-strip .demo-header { flex-wrap: wrap; }
 #live-status { font-size: 12px; color: var(--muted); }
 #live-status[data-status="running"], #live-status[data-status="completed"] { color: var(--accent); }
 #live-status[data-status="blocked"], #live-status[data-status="interrupted"] { color: var(--warning); }

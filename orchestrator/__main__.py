@@ -162,7 +162,8 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("action") == "cancel_waiting":
                     self.json_response(200, self.server.live.cancel_waiting(match[1]))
                 elif body.get("action") == "retry_review":
-                    self.json_response(202, self.server.live.retry_review(match[1]))
+                    acceptance = required_text(body, "acceptance", 8000) if "acceptance" in body else None
+                    self.json_response(202, self.server.live.retry_review(match[1], acceptance))
                 else:
                     local = body.get("local_coordinator", False)
                     if type(local) is not bool or body.get("action") != "start":

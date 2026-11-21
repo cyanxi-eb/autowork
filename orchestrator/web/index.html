@@ -118,10 +118,10 @@
       <h2 id="run-title">开始项目运行</h2>
       <label for="run-source">本地 Git 仓库</label>
       <input id="run-source" maxlength="1024" required autofocus>
-      <p class="connection-status">以仓库当前 Git 提交创建独立候选副本。执行和返修在副本中进行。</p>
+      <p id="run-source-hint" class="connection-status">以仓库当前 Git 提交创建独立候选副本。执行和返修在副本中进行。</p>
       <label for="run-acceptance">验收条件</label>
       <textarea id="run-acceptance" rows="4" maxlength="8000" required placeholder="写下预期结果，以及复核 Agent 可以执行的测试或检查。"></textarea>
-      <label class="checkbox-row"><input id="run-local" type="checkbox">按我的验收条件直接开始，跳过 DeepSeek API 追问</label>
+      <label id="run-local-label" class="checkbox-row"><input id="run-local" type="checkbox">按我的验收条件直接开始，跳过 DeepSeek API 追问</label>
       <p id="run-connections" class="connection-status" role="status"></p>
       <p id="run-error" class="form-error" role="alert" hidden></p>
       <div class="dialog-actions"><button id="cancel-run" type="button">取消</button><button class="primary" type="submit">开始运行</button></div>
