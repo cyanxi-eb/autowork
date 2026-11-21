@@ -439,26 +439,22 @@ async function refreshEvents() {
   if (!active || active.refreshing) return;
   active.refreshing = true;
   try {
-    const events = [];
-    let after = active.cursor;
     let data;
     do {
-      data = await api(`/api/projects/${active.project.id}/events?after=${after}`);
+      data = await api(`/api/projects/${active.project.id}/events?after=${active.cursor}`);
       if (state.active !== active) return;
-      after = data.cursor;
-      events.push(...data.events);
+      active.cursor = data.cursor;
+      for (const event of data.events) {
+        if (event.kind === "message.added") active.messages.push(event);
+        if (event.kind === "demo.changed") active.run = event.data;
+        if (event.kind === "live.changed") applyLiveChanged(active, event);
+        if (event.kind === "artifact.created") active.artifacts.set(event.data.path, event.data);
+      }
+      if (data.events.length) {
+        renderProject();
+        if (byId("artifact-dialog").open) renderArtifacts();
+      }
     } while (data.events.length === 200);
-    active.cursor = after;
-    for (const event of events) {
-      if (event.kind === "message.added") active.messages.push(event);
-      if (event.kind === "demo.changed") active.run = event.data;
-      if (event.kind === "live.changed") applyLiveChanged(active, event);
-      if (event.kind === "artifact.created") active.artifacts.set(event.data.path, event.data);
-    }
-    if (events.length) {
-      renderProject();
-      if (byId("artifact-dialog").open) renderArtifacts();
-    }
     if (active.offline) note("");
     active.offline = false;
   } catch {
