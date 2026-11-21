@@ -275,7 +275,7 @@ function renderLiveElapsed() {
   const active = state.active;
   const run = active?.live;
   const start = active?.liveStart;
-  const running = !active?.project.demo && run?.status === "running" && start
+  const running = !active?.replaying && !active?.project.demo && run?.status === "running" && start
     && start.projectId === active.project.id && start.runId === run.id
     && start.phase === run.phase && start.round === run.round;
   const text = running ? elapsedText(start.startedAt) : null;
@@ -444,6 +444,8 @@ async function refreshEvents() {
       data = await api(`/api/projects/${active.project.id}/events?after=${active.cursor}`);
       if (state.active !== active) return;
       active.cursor = data.cursor;
+      // A full page may have a newer state on the next page; keep the elapsed label hidden until caught up.
+      if (data.events.length === 200) active.replaying = true;
       for (const event of data.events) {
         if (event.kind === "message.added") active.messages.push(event);
         if (event.kind === "demo.changed") active.run = event.data;
@@ -455,6 +457,10 @@ async function refreshEvents() {
         if (byId("artifact-dialog").open) renderArtifacts();
       }
     } while (data.events.length === 200);
+    if (active.replaying) {
+      active.replaying = false;
+      renderLiveElapsed();
+    }
     if (active.offline) note("");
     active.offline = false;
   } catch {
@@ -474,7 +480,7 @@ function selectProject(id) {
   if (contextDialog.open) contextDialog.close();
   if (runDialog.open) runDialog.close();
   state.active = selected ? {
-    project: selected, messages: [], cursor: 0, artifacts: new Map(), liveStart: null,
+    project: selected, messages: [], cursor: 0, artifacts: new Map(), liveStart: null, replaying: true,
     disclosures: { left: new Map(), right: new Map() },
   } : null;
   state.mobileSide = null;
