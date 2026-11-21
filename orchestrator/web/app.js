@@ -204,6 +204,7 @@ function renderArtifacts() {
   if (!active?.artifacts.size) return;
   const key = active.artifacts.has(active.selectedArtifact) ? active.selectedArtifact : [...active.artifacts.keys()].at(-1);
   const selected = active.artifacts.get(key);
+  active.selectedArtifact = key;
   byId("artifact-list").replaceChildren(...Array.from(active.artifacts, ([path, artifact]) => {
     const button = node("button", artifact.title);
     button.type = "button";
@@ -321,7 +322,10 @@ function renderDock(side) {
   sessionChooser.value = sessions.has(config.session) ? config.session : "";
   const focus = sessionChooser.value;
   const visible = focus ? [[focus, sessions.get(focus)]] : [...sessions];
-  panel.querySelector(".candidate").textContent = (focus ? sessions.get(focus).at(-1) : allMessages.at(-1))?.data.candidate ?? "";
+  const candidate = (focus ? sessions.get(focus).at(-1) : allMessages.at(-1))?.data.candidate;
+  const candidateLabel = panel.querySelector(".candidate");
+  candidateLabel.textContent = candidate?.slice(0, 12) ?? "";
+  candidateLabel.title = candidate ?? "";
   renderDockHistory(panel.querySelector(".dock-messages"), visible, config.agent, focus, state.active?.disclosures[side]);
 }
 
@@ -348,7 +352,9 @@ function renderDockHistory(container, sessions, agent, focus, disclosures) {
     const openByDefault = follow ? latest : (wasOpen.get(id) ?? false);
     details.open = disclosures?.get(key) ?? openByDefault;
     const summary = node("summary", "", "session-summary");
-    summary.append(node("strong", title), node("span", candidate ?? `${events.length} 条`, "candidate"));
+    const candidateLabel = node("span", candidate?.slice(0, 12) ?? `${events.length} 条`, "candidate");
+    candidateLabel.title = candidate ?? "";
+    summary.append(node("strong", title), candidateLabel);
     summary.addEventListener("click", () => disclosures?.set(key, !details.open));
     const entries = node("div", "", "session-entries");
     entries.append(...events.map(entry));

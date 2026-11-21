@@ -35,4 +35,4 @@ class AgentAdapter(Protocol):
 
 class MockCoordinator:
     def respond(self, task: AgentTask) -> str:
-        return "已记录这条补充。当前使用本地模拟，真实追问和派工将在接入后启用。"
+        return "已记录这条补充。准备好后，可以点击「开始运行」设置工作区和验收条件。"

@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from io import BytesIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +9,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from orchestrator.agent_protocol import AgentResult, ProtocolError, parse_result
-from orchestrator.agent_runtimes import AgentError, cli_result
+from orchestrator.agent_runtimes import AgentError, AgentRuntimes, cli_result
 from orchestrator.candidate import git
 from orchestrator.connections import Connections
 from orchestrator.live_runs import LiveRuns, exclusive_run
@@ -134,6 +135,26 @@ class LiveRunTest(TestCase):
 
 
 class ProtocolTest(TestCase):
+    def test_deepseek_api_uses_the_same_protocol_and_conversation_history(self):
+        task = {"task_id": "task-1", "candidate": None, "phase": "coordinate"}
+        reply = {"version": 1, "task_id": "task-1", "candidate": None,
+                 "status": "ready", "summary": "Confirmed.", "items": []}
+        response = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]}
+        settings = {"base_url": "https://example.test/v1", "model": "fixture", "effort": "", "key_env": "AUTOWORK_TEST_KEY"}
+        history = [{"role": "assistant", "content": "What should the test check?"}]
+        with patch("orchestrator.agent_runtimes.build_opener") as opener, patch.dict("os.environ", {"AUTOWORK_TEST_KEY": "fake"}):
+            call_api = opener.return_value.open
+            call_api.return_value = BytesIO(json.dumps(response).encode())
+            result, session = AgentRuntimes(None).run("deepseek", task, None, None, settings, history)
+        request = call_api.call_args.args[0]
+        self.assertEqual(request.full_url, "https://example.test/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer fake")
+        payload = json.loads(request.data)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["messages"][1], history[0])
+        self.assertEqual(result.status, "ready")
+        self.assertIsNone(session)
+
     def test_result_requires_matching_identifiers_and_phase(self):
         task = {"task_id": "task-1", "candidate": "commit-1", "phase": "review"}
         result = {"version": 1, "task_id": "task-1", "candidate": "commit-1",
