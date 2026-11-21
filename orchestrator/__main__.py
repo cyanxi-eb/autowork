@@ -9,20 +9,24 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from .agent_context import persona_path
+from .agent_runtimes import AgentRuntimes
 from .agents import MockCoordinator
 from .connections import Connections
 from .demo import Demo, DemoConflict, POLICIES, STEPS
+from .live_runs import LiveRuns, PHASES, RunConflict
 from .store import Store
 from .workbench import Workbench
 
 
 STATIC = Path(__file__).resolve().parent / "web"
+SOURCE = STATIC.parent.parent
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
-PROJECT = re.compile(r"/api/projects/([a-f0-9]{32})(?:/(events|messages|demo|memory))?")
+PROJECT = re.compile(r"/api/projects/([a-f0-9]{32})(?:/(events|messages|demo|memory|run|document))?")
 AGENT = re.compile(r"/api/agents/(deepseek|dsh|codex)/(connection|persona)")
 
 
@@ -72,15 +76,17 @@ class Handler(BaseHTTPRequestHandler):
         workbench = self.server.workbench
         if path == "/api/workbench":
             snapshot = {
-                "mode": "mock", "agents": workbench.agents(), "projects": workbench.store.list_projects(),
+                "mode": "live", "agents": workbench.agents(), "projects": workbench.store.list_projects(),
                 "demo": {"steps": STEPS, "policies": POLICIES},
+                "live": {"phases": {key: value[1] for key, value in PHASES.items()},
+                         "default_source": str(SOURCE) if (SOURCE / ".git").exists() else ""},
             }
             if self.server.desktop_instance:
                 snapshot["desktop_instance"] = self.server.desktop_instance
             self.json_response(200, snapshot)
             return
         match = PROJECT.fullmatch(path)
-        if match and match[2] in (None, "events", "memory"):
+        if match and match[2] in (None, "events", "memory", "document"):
             self.get_project(match[1], match[2], address.query)
             return
         match = AGENT.fullmatch(path)
@@ -102,6 +108,9 @@ class Handler(BaseHTTPRequestHandler):
             if resource == "memory":
                 self.json_response(200, store.read_memory(project_id))
                 return
+            if resource == "document":
+                self.json_response(200, store.read_document(project_id, parse_qs(query).get("path", [""])[0]))
+                return
             project = store.get_project(project_id)
             if resource is None:
                 self.json_response(200, project)
@@ -113,9 +122,9 @@ class Handler(BaseHTTPRequestHandler):
             cursor = events[-1]["seq"] if events else after
             self.json_response(200, {"events": events, "cursor": cursor})
         except KeyError:
-            self.json_response(404, {"error": "项目不存在。"})
+            self.json_response(404, {"error": "项目或文档不存在。"})
         except (OSError, UnicodeError):
-            self.json_response(409, {"error": "项目记忆不可读，请检查本地 Markdown 文件。"})
+            self.json_response(409, {"error": "项目文档不可读，请检查本地 Markdown 文件。"})
         except ValueError:
             self.json_response(400, {"error": "事件游标无效。"})
 
@@ -149,10 +158,24 @@ class Handler(BaseHTTPRequestHandler):
             elif match and match[2] == "demo":
                 self.server.demo.control(match[1], required_text(body, "action", 16), body.get("policy"))
                 self.json_response(200, {"accepted": True})
+            elif match and match[2] == "run":
+                if body.get("action") == "cancel_waiting":
+                    self.json_response(200, self.server.live.cancel_waiting(match[1]))
+                else:
+                    local = body.get("local_coordinator", False)
+                    if type(local) is not bool or body.get("action") != "start":
+                        raise ValueError("运行操作或协调设置无效。")
+                    run = self.server.live.start(
+                        match[1], required_text(body, "source", 1024),
+                        required_text(body, "acceptance", 8000), local_coordinator=local,
+                    )
+                    self.json_response(202, run)
             elif match and match[2] == "messages":
                 if workbench.store.get_project(match[1])["demo"]:
                     raise DemoConflict("请用演示操作区选择策略或控制运行。")
-                workbench.add_input(match[1], required_text(body, "text", 8000))
+                user_text = required_text(body, "text", 8000)
+                if not self.server.live.add_input(match[1], user_text):
+                    workbench.add_input(match[1], user_text)
                 self.json_response(201, {"accepted": True})
             else:
                 self.json_response(404, {"error": "找不到此操作。"})
@@ -162,7 +185,7 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(400, {"error": "请求内容无效。"})
         except OSError:
             self.json_response(409, {"error": "人设或项目记忆不可读，请检查本地 Markdown 文件。"})
-        except DemoConflict as error:
+        except (DemoConflict, RunConflict) as error:
             self.json_response(409, {"error": str(error)})
         except ValueError as error:
             self.json_response(400, {"error": str(error)})
@@ -172,16 +195,18 @@ class WorkbenchServer(ThreadingHTTPServer):
     def service_actions(self):
         try:
             self.demo.tick()
+            self.live.tick()
         except sqlite3.Error:
             logging.exception("Could not commit the next demo step")
 
 
-def create_server(data_dir, port, *, demo_delay=1.8):
+def create_server(data_dir, port, *, demo_delay=1.8, runtimes=None):
     store = Store(data_dir)
     server = WorkbenchServer(("127.0.0.1", port), Handler)
     server.workbench = Workbench(store, MockCoordinator())
     server.demo = Demo(store, delay=demo_delay)
     server.connections = Connections(store)
+    server.live = LiveRuns(store, server.connections, runtimes or AgentRuntimes(server.connections))
     server.desktop_instance = None
     return server
 

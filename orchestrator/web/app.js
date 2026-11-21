@@ -6,18 +6,21 @@ const messageInput = byId("message");
 const createDialog = byId("create-dialog");
 const connectionDialog = byId("connection-dialog");
 const contextDialog = byId("context-dialog");
+const runDialog = byId("run-dialog");
 const compact = matchMedia("(max-width: 880px)");
 const sides = ["left", "right"];
 const defaults = { left: "dsh", right: "codex" };
 const agentMarks = { deepseek: "DS", dsh: "DSH", codex: "CX" };
 const titleByStage = { intake: "需求收集", review: "模拟复核" };
 const demoLabels = { waiting_input: "等待确认", running: "运行中", paused: "已暂停", completed: "已完成", blocked: "已阻塞" };
+const liveLabels = { ...demoLabels, waiting_input: "等待补充", queued: "待派发", interrupted: "执行待核实" };
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const state = { agents: [], projects: [], active: null, layout: {}, mobileSide: null };
 const connectionFields = {
   base_url: ["API 基础地址", "url", "https://api.deepseek.com"],
   key_env: ["密钥环境变量名", "text", "DEEPSEEK_API_KEY"],
   command: ["CLI 命令或可执行文件路径", "text", ""],
+  provider: ["DSH Provider", "text", "留空按 API 密钥或桌面账户自动选择"],
   model: ["模型", "text", "留空使用适配器默认值"],
   effort: ["思考档位", "text", "留空使用适配器默认值"],
 };
@@ -130,10 +133,13 @@ function renderMessages(container, messages, emptyText, heading = "") {
 function renderConversation() {
   const project = state.active?.project;
   const run = state.active?.run;
-  composer.hidden = !project || project.demo;
+  const live = state.active?.live;
+  composer.hidden = !project || project.demo || ["running", "queued"].includes(live?.status);
   byId("stage").hidden = !project;
   byId("project-memory").hidden = !project;
-  byId("stage").textContent = run ? state.demo.steps[run.step] ?? "已完成" : titleByStage[project?.stage] ?? "";
+  byId("stage").textContent = run ? state.demo.steps[run.step] ?? "已完成"
+    : live ? state.live.phases[live.phase] : titleByStage[project?.stage] ?? "";
+  byId("workspace-mode").textContent = project?.demo ? "本地演示" : live ? "Agent 运行" : "本地工作台";
   renderMessages(
     byId("conversation"), messagesIn("deepseek"),
     project ? "正在读取项目对话。" : "打开演示体验从需求到验收，或新建项目记录自己的需求。",
@@ -211,7 +217,79 @@ function renderArtifacts() {
   }));
   byId("artifact-name").textContent = selected.title;
   byId("artifact-path").textContent = selected.path;
-  byId("artifact-content").textContent = selected.content;
+  renderDocument(byId("artifact-content"), selected.content, selected.path, active.project);
+}
+
+function renderDocument(container, content, path, project) {
+  const preview = node("div", "", "markdown-preview");
+  const openRelative = path && project ? (href) => {
+    try {
+      const url = new URL(href, new URL(path.split("/").map(encodeURIComponent).join("/"), "https://preview.invalid/"));
+      if (url.origin !== "https://preview.invalid") return;
+      const name = decodeURIComponent(url.pathname.slice(1));
+      void openContextDocument(name.split("/").at(-1), "/api/projects/" + project.id + "/document?path=" + encodeURIComponent(name), name, project);
+    } catch {
+      note("文档链接无法打开。");
+    }
+  } : undefined;
+  renderMarkdown(preview, content, openRelative);
+  const raw = node("details", "", "markdown-source");
+  raw.append(node("summary", "查看 Markdown 源文"), node("pre", content));
+  container.replaceChildren(preview, raw);
+}
+
+function renderLive() {
+  const active = state.active;
+  const strip = byId("live-strip");
+  strip.hidden = !active || active.project.demo;
+  if (strip.hidden) return;
+  const run = active.live;
+  const status = byId("live-status");
+  status.textContent = run ? liveLabels[run.status] : "未开始";
+  status.dataset.status = run?.status ?? "";
+  byId("live-round").textContent = run ? "第 " + run.round + " 轮" + (run.candidate ? " · " + run.candidate.slice(0, 12) : "") : "";
+  byId("live-detail").textContent = run?.detail ?? "建好需求后，选择本地仓库和验收条件开始运行。";
+  const launch = byId("run-project");
+  launch.hidden = ["queued", "running", "waiting_input"].includes(run?.status);
+  launch.textContent = run ? "开始新运行" : "开始运行";
+  byId("live-cancel").hidden = run?.status !== "waiting_input";
+  const artifacts = byId("live-artifacts");
+  artifacts.disabled = !active.artifacts.size;
+  artifacts.textContent = "交付物 " + active.artifacts.size;
+  const phases = ["coordinate", "survey", "plan", "implement", "review"];
+  const index = phases.indexOf(run?.phase === "repair" ? "implement" : run?.phase);
+  const steps = byId("live-steps");
+  steps.replaceChildren(...phases.map((phase, position) => {
+    const done = run?.status === "completed" || position < index;
+    const current = !done && position === index;
+    const item = node("li", "", done ? "done" : current ? "current" : "");
+    const label = phase === "implement" && (run?.round ?? 1) > 1 ? state.live.phases.repair : state.live.phases[phase];
+    item.append(node("span", done ? "✓" : String(position + 1), "step-index"), node("span", label));
+    if (current) item.setAttribute("aria-current", "step");
+    return item;
+  }));
+}
+
+async function openRunDialog() {
+  const active = state.active;
+  if (!active || active.project.demo) return;
+  byId("run-form").reset();
+  byId("run-source").value = active.live?.source ?? state.live.default_source;
+  byId("run-acceptance").value = active.live?.acceptance ?? "";
+  byId("run-error").hidden = true;
+  byId("run-connections").textContent = "正在检测本机 Agent…";
+  runDialog.showModal();
+  try {
+    const connections = await Promise.all(state.agents.map((agent) => api("/api/agents/" + agent.id + "/connection")));
+    if (!runDialog.open || state.active !== active) return;
+    const missing = connections.filter((connection) => !connection.available).map((connection) => connection.id);
+    byId("run-local").checked = missing.includes("deepseek");
+    byId("run-connections").textContent = missing.length
+      ? "待配置 " + missing.join("、") + "。勾选直接开始时只需要 DSH 和 Codex。"
+      : "已检测到 CLI 和 DeepSeek 密钥环境变量，实际连通性将在派发时确认。";
+  } catch (error) {
+    if (runDialog.open && state.active === active) byId("run-connections").textContent = error.message;
+  }
 }
 
 function renderDock(side) {
@@ -283,6 +361,7 @@ function renderDockHistory(container, sessions, agent, focus, disclosures) {
 function renderProject() {
   renderConversation();
   renderDemo();
+  renderLive();
   for (const side of sides) renderDock(side);
 }
 
@@ -299,6 +378,7 @@ async function refreshEvents() {
       for (const event of data.events) {
         if (event.kind === "message.added") active.messages.push(event);
         if (event.kind === "demo.changed") active.run = event.data;
+        if (event.kind === "live.changed") active.live = event.data;
         if (event.kind === "artifact.created") active.artifacts.set(event.data.path, event.data);
       }
       if (data.events.length) {
@@ -323,6 +403,7 @@ function selectProject(id) {
   if (state.active?.project.id !== selected?.id) messageInput.value = "";
   if (byId("artifact-dialog").open) byId("artifact-dialog").close();
   if (contextDialog.open) contextDialog.close();
+  if (runDialog.open) runDialog.close();
   state.active = selected ? {
     project: selected, messages: [], cursor: 0, artifacts: new Map(),
     disclosures: { left: new Map(), right: new Map() },
@@ -381,18 +462,18 @@ function openPersona(agentId) {
   if (agent) void openContextDocument(`${agent.name} 人设`, `/api/agents/${agentId}/persona`);
 }
 
-async function openContextDocument(title, url) {
+async function openContextDocument(title, url, path, project) {
   const request = {};
   state.contextRequest = request;
   byId("context-title").textContent = title;
   byId("context-path").textContent = "";
   byId("context-content").textContent = "正在读取…";
-  contextDialog.showModal();
+  if (!contextDialog.open) contextDialog.showModal();
   try {
     const data = await api(url);
     if (state.contextRequest !== request || !contextDialog.open) return;
     byId("context-path").textContent = data.path;
-    byId("context-content").textContent = data.content;
+    renderDocument(byId("context-content"), data.content, path, project);
   } catch (error) {
     if (state.contextRequest === request && contextDialog.open) byId("context-content").textContent = error.message;
   }
@@ -420,7 +501,9 @@ async function openConnection(agentId) {
 function renderConnection(data) {
   state.connection.ready = true;
   const credential = data.key_available ? "已检测到密钥环境变量。" : "尚未检测到密钥环境变量。";
-  byId("connection-status").textContent = `${data.kind === "api" ? `HTTP API · ${credential}` : "本地 CLI。"} 当前运行模拟任务，填写项保存在此工作台。`;
+  byId("connection-status").textContent = data.kind === "api" ? "HTTP API · " + credential
+    : data.available ? "已找到 " + data.resolved_command + "。实际登录状态将在派发时确认。"
+      : "未找到本地 CLI。请输入已安装 Agent 的命令或可执行文件路径。";
   byId("connection-fields").replaceChildren(...Object.entries(data.settings).map(([name, value]) => {
     const [label, type, hint] = connectionFields[name];
     const group = node("div", "", "connection-field");
@@ -481,6 +564,7 @@ async function boot() {
   state.agents = data.agents;
   state.projects = data.projects;
   state.demo = data.demo;
+  state.live = data.live;
   byId("demo-choices").replaceChildren(...Object.entries(state.demo.policies).map(([policy, label]) => {
     const button = node("button", label, policy === "keep" ? "primary" : "");
     button.type = "button";
@@ -530,16 +614,56 @@ async function boot() {
   });
 
   byId("demo-control").addEventListener("click", (event) => demoAction(event.currentTarget.dataset.action));
-  byId("artifacts").addEventListener("click", () => {
-    renderArtifacts();
-    byId("artifact-dialog").showModal();
+  for (const id of ["artifacts", "live-artifacts"]) {
+    byId(id).addEventListener("click", () => {
+      renderArtifacts();
+      byId("artifact-dialog").showModal();
+    });
+  }
+  byId("run-project").addEventListener("click", openRunDialog);
+  byId("cancel-run").addEventListener("click", () => runDialog.close());
+  byId("live-cancel").addEventListener("click", async () => {
+    const active = state.active;
+    try {
+      await api("/api/projects/" + active.project.id + "/run", { action: "cancel_waiting" });
+      if (state.active === active) await refreshEvents();
+    } catch (error) {
+      if (state.active === active) note(error.message);
+    }
+  });
+  byId("run-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const active = state.active;
+    const button = event.currentTarget.querySelector("button[type=submit]");
+    const error = byId("run-error");
+    error.hidden = true;
+    button.disabled = true;
+    try {
+      const run = await api("/api/projects/" + active.project.id + "/run", {
+        action: "start", source: byId("run-source").value, acceptance: byId("run-acceptance").value,
+        local_coordinator: byId("run-local").checked,
+      });
+      if (state.active === active) {
+        active.live = run;
+        runDialog.close();
+        renderProject();
+        await refreshEvents();
+      }
+    } catch (failure) {
+      if (state.active === active) {
+        error.textContent = failure.message;
+        error.hidden = false;
+      }
+    } finally {
+      button.disabled = false;
+    }
   });
   byId("close-artifacts").addEventListener("click", () => byId("artifact-dialog").close());
   byId("deepseek-connection").addEventListener("click", () => openConnection("deepseek"));
   byId("deepseek-persona").addEventListener("click", () => openPersona("deepseek"));
   byId("project-memory").addEventListener("click", () => {
     const project = state.active?.project;
-    if (project) void openContextDocument("项目记忆", `/api/projects/${project.id}/memory`);
+    if (project) void openContextDocument("项目记忆", "/api/projects/" + project.id + "/memory", "MEMORY.md", project);
   });
   byId("close-context").addEventListener("click", () => contextDialog.close());
   byId("close-connection").addEventListener("click", () => connectionDialog.close());

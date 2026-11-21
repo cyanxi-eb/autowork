@@ -170,6 +170,32 @@ dialog textarea { resize: vertical; }
 .artifact-preview h3 { margin: 0 0 4px; font-size: 14px; }
 .artifact-preview p { margin: 0 0 9px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .artifact-preview pre { margin: 0; font: 12px/1.65 Consolas, "Microsoft YaHei UI", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+#live-steps { grid-template-columns: repeat(5, minmax(105px, 1fr)); }
+#live-status { font-size: 12px; color: var(--muted); }
+#live-status[data-status="running"], #live-status[data-status="completed"] { color: var(--accent); }
+#live-status[data-status="blocked"], #live-status[data-status="interrupted"] { color: var(--warning); }
+.live-detail { margin: 8px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.checkbox-row { display: flex; align-items: flex-start; gap: 8px; }
+.checkbox-row input { width: auto; margin: 2px 0 0; }
+.markdown-preview { overflow-wrap: anywhere; }
+.markdown-preview :is(h1, h2, h3, h4, h5, h6) { margin: .9em 0 .4em; line-height: 1.35; }
+.markdown-preview h1 { font-size: 21px; }
+.markdown-preview h2 { font-size: 17px; }
+.markdown-preview :is(p, ul, ol, blockquote) { margin: .6em 0; font-size: 14px; line-height: 1.65; color: inherit; }
+.markdown-preview p { white-space: pre-line; }
+.markdown-preview :is(ul, ol) { padding-left: 1.5em; }
+.markdown-preview pre { padding: 9px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.markdown-preview :not(pre) > code { padding: .1em .35em; background: var(--surface); border-radius: 4px; }
+.markdown-preview blockquote { padding-left: 12px; border-left: 3px solid var(--line); }
+.markdown-preview hr { border: 0; border-top: 1px solid var(--line); }
+.markdown-table { overflow-x: auto; }
+.markdown-preview table { border-collapse: collapse; margin: .6em 0; }
+.markdown-preview :is(th, td) { padding: 5px 8px; border: 1px solid var(--line); text-align: left; }
+.markdown-preview a, .markdown-link { color: var(--accent); text-decoration: underline; }
+.markdown-link { display: inline; padding: 0; border: 0; background: transparent; font: inherit; }
+.markdown-source { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 12px; }
+.markdown-source summary { cursor: pointer; margin-bottom: 8px; color: var(--muted); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
 @media (max-width: 880px) {

@@ -14,7 +14,7 @@ TEMPLATE = """# 项目记忆
 
 STATUSES = {
     "waiting_input": "待确认需求", "running": "运行中", "paused": "已暂停",
-    "completed": "已交付", "blocked": "验收阻塞",
+    "completed": "已交付", "blocked": "验收阻塞", "queued": "待派发", "interrupted": "执行待核实",
 }
 POLICIES = {"keep": "保留原记录", "update": "更新原记录"}
 
@@ -22,6 +22,7 @@ POLICIES = {"keep": "保留原记录", "update": "更新原记录"}
 def checkpoint(project, events):
     last_run = None
     last_review = None
+    live = None
     initial_request = None
     accepted = []
     artifacts = set()
@@ -29,6 +30,8 @@ def checkpoint(project, events):
         kind, data = event["kind"], event["data"]
         if kind == "demo.changed":
             last_run = data
+        elif kind == "live.changed":
+            live = data
         elif kind == "message.added" and initial_request is None and data["author"] == "user" and data["channel"] == "deepseek":
             initial_request = " ".join(data["text"].split())
         elif kind == "test.completed":
@@ -42,7 +45,15 @@ def checkpoint(project, events):
     if initial_request:
         excerpt = initial_request[:320] + ("…" if len(initial_request) > 320 else "")
         lines.append(f"- 初始需求摘录（以需求档案为准） {excerpt}")
-    if last_run:
+    if live:
+        lines.append(f"- 实际运行状态 {STATUSES.get(live['status'], live['status'])}，第 {live['round']} 轮。")
+        lines.append(f"- 当前进度 {live['detail']}")
+        if live["candidate"]:
+            lines.append(f"- 候选提交 {live['candidate']}。")
+        delivery = f"runs/{live['id']}/delivery.md"
+        if delivery in artifacts:
+            lines.append(f"- [当前运行交付摘要]({delivery})")
+    elif last_run:
         status = last_run["status"]
         phase = last_run.get("phase") or f"步骤 {last_run['step'] + 1}"
         lines.append(f"- 演示状态 {STATUSES.get(status, status)}，{phase}。")

@@ -11,8 +11,8 @@ from orchestrator.__main__ import create_server
 
 
 @contextmanager
-def running_server(root):
-    with create_server(root, 0) as server:
+def running_server(root, **options):
+    with create_server(root, 0, **options) as server:
         worker = Thread(target=server.serve_forever)
         worker.start()
         try:

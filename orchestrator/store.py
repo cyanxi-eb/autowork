@@ -42,6 +42,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS agent_connections (
                     agent_id TEXT PRIMARY KEY, settings TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS live_runs (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                    status TEXT NOT NULL, state TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS live_runs_project ON live_runs(project_id);
             """)
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(demo_runs)")}
@@ -136,6 +141,27 @@ class Store:
                 self.sync_files(project_id)
             return {"path": str(path), "content": path.read_text(encoding="utf-8-sig")}
 
+    def read_document(self, project_id, name):
+        self.get_project(project_id)
+        if name == "MEMORY.md":
+            return self.read_memory(project_id)
+        if name in ("requirements/需求档案.md", "progress.md"):
+            folder = self.root / "projects" / project_id
+            target = folder / name
+            if target.resolve() != target:
+                raise OSError("Project document is outside its archive.")
+            with self.write_lock:
+                return {"path": name, "content": target.read_text(encoding="utf-8-sig")}
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT data FROM events WHERE project_id = ? AND kind = 'artifact.created' "
+                "AND json_extract(data, '$.path') = ? ORDER BY seq DESC LIMIT 1",
+                (project_id, name),
+            ).fetchone()
+        if row is None:
+            raise KeyError(name)
+        return {"path": name, "content": json.loads(row["data"])["content"]}
+
     def sync_files(self, project_id):
         """Rebuild the owned Markdown projection from committed input events."""
         try:
@@ -146,7 +172,7 @@ class Store:
             with self.connection() as db:
                 rows = db.execute(
                     "SELECT kind, occurred_at, data FROM events WHERE project_id = ? "
-                    "AND kind IN ('message.added', 'artifact.created', 'stage.accepted', 'demo.changed', 'test.completed') ORDER BY seq",
+                    "AND kind IN ('message.added', 'artifact.created', 'stage.accepted', 'demo.changed', 'live.changed', 'test.completed') ORDER BY seq",
                     (project_id,),
                 )
                 entries = [dict(row) | {"data": json.loads(row["data"])} for row in rows]
@@ -159,10 +185,12 @@ class Store:
                 elif entry["kind"] == "artifact.created":
                     target = (folder / data["path"]).resolve()
                     if target.is_relative_to(folder.resolve()):
+                        target.parent.mkdir(parents=True, exist_ok=True)
                         self.write_file(target, data["content"])
                 elif entry["kind"] == "stage.accepted":
                     date = datetime.fromisoformat(entry["occurred_at"]).astimezone().isoformat(timespec="seconds")
-                    progress.append(f"- {date}－{data['title']}已完成（演示，{data['candidate']}）")
+                    mode = "演示，" if project["demo"] else ""
+                    progress.append(f"- {date}－{data['title']}已完成（{mode}{data['candidate']}）")
             self.write_file(folder / "requirements" / "需求档案.md", "\n".join(lines))
             progress_path = folder / "progress.md"
             if len(progress) > 2 or not progress_path.exists():

@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>项目工作台</title>
   <link rel="stylesheet" href="/style.css">
+  <script defer src="/markdown.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -17,7 +18,7 @@
       <button id="project-memory" class="project-memory" type="button" hidden>项目记忆</button>
     </div>
     <div class="actions">
-      <span class="mode"><i></i>本地模拟</span>
+      <span class="mode"><i></i><span id="workspace-mode">本地工作台</span></span>
       <button id="theme-toggle" type="button" aria-pressed="false">暗色</button>
       <button id="new-project" type="button">新建项目</button>
       <button id="demo" class="primary" type="button">打开演示</button>
@@ -33,6 +34,19 @@
       </div>
     </div>
     <ol id="demo-steps" class="demo-steps" aria-label="闭环步骤"></ol>
+  </section>
+
+  <section id="live-strip" class="demo-strip" aria-label="项目进度" hidden>
+    <div class="demo-header">
+      <div class="demo-heading"><strong>项目进度</strong><span id="live-status" role="status"></span><span id="live-round" class="round-label"></span></div>
+      <div class="demo-actions">
+        <button id="live-artifacts" type="button" disabled>交付物</button>
+        <button id="live-cancel" type="button" hidden>结束确认</button>
+        <button id="run-project" class="primary" type="button">开始运行</button>
+      </div>
+    </div>
+    <ol id="live-steps" class="demo-steps" aria-label="项目步骤"></ol>
+    <p id="live-detail" class="live-detail"></p>
   </section>
 
   <nav class="layout-bar" aria-label="工作台布局">
@@ -98,14 +112,29 @@
     </form>
   </dialog>
 
+  <dialog id="run-dialog" aria-labelledby="run-title">
+    <form id="run-form">
+      <h2 id="run-title">开始项目运行</h2>
+      <label for="run-source">本地 Git 仓库</label>
+      <input id="run-source" maxlength="1024" required autofocus>
+      <p class="connection-status">以仓库当前 Git 提交创建独立候选副本。执行和返修在副本中进行。</p>
+      <label for="run-acceptance">验收条件</label>
+      <textarea id="run-acceptance" rows="4" maxlength="8000" required placeholder="写下预期结果，以及复核 Agent 可以执行的测试或检查。"></textarea>
+      <label class="checkbox-row"><input id="run-local" type="checkbox">按我的验收条件直接开始，跳过 DeepSeek API 追问</label>
+      <p id="run-connections" class="connection-status" role="status"></p>
+      <p id="run-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="cancel-run" type="button">取消</button><button class="primary" type="submit">开始运行</button></div>
+    </form>
+  </dialog>
+
   <dialog id="artifact-dialog" class="artifacts-dialog" aria-labelledby="artifact-title">
-    <header><h2 id="artifact-title">演示交付物</h2><button id="close-artifacts" type="button">关闭</button></header>
+    <header><h2 id="artifact-title">交付物</h2><button id="close-artifacts" type="button">关闭</button></header>
     <div class="artifact-layout">
       <nav id="artifact-list" aria-label="交付物列表"></nav>
       <section class="artifact-preview" aria-labelledby="artifact-name">
         <h3 id="artifact-name"></h3>
         <p id="artifact-path"></p>
-        <pre id="artifact-content"></pre>
+        <div id="artifact-content"></div>
       </section>
     </div>
   </dialog>
@@ -114,7 +143,7 @@
     <header><h2 id="context-title"></h2><button id="close-context" type="button">关闭</button></header>
     <section class="artifact-preview" aria-label="Markdown 内容">
       <p id="context-path"></p>
-      <pre id="context-content" tabindex="0"></pre>
+      <div id="context-content" tabindex="0"></div>
     </section>
   </dialog>
 </body>
