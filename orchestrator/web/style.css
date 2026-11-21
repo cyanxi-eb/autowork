@@ -176,6 +176,7 @@ dialog textarea { resize: vertical; }
 #live-status { font-size: 12px; color: var(--muted); }
 #live-status[data-status="running"], #live-status[data-status="completed"] { color: var(--accent); }
 #live-status[data-status="blocked"], #live-status[data-status="interrupted"] { color: var(--warning); }
+#live-elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .live-detail { margin: 8px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .checkbox-row { display: flex; align-items: flex-start; gap: 8px; }
 .checkbox-row input { width: auto; margin: 2px 0 0; }

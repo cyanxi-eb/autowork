@@ -240,11 +240,58 @@ function renderDocument(container, content, path, project) {
   container.replaceChildren(preview, raw);
 }
 
+function startFromEvent(active, event) {
+  const run = event.data;
+  return run.status === "running"
+    ? { projectId: active.project.id, runId: run.id, phase: run.phase, round: run.round, startedAt: event.occurred_at }
+    : null;
+}
+
+function applyLiveChanged(active, event) {
+  active.live = event.data;
+  const start = startFromEvent(active, event);
+  if (!start) {
+    active.liveStart = null;
+    return;
+  }
+  const current = active.liveStart;
+  const sameStage = current && current.projectId === start.projectId && current.runId === start.runId
+    && current.phase === start.phase && current.round === start.round;
+  active.liveStart = sameStage ? current : start;
+}
+
+function elapsedText(occurredAt, now = Date.now()) {
+  const started = Date.parse(occurredAt);
+  if (!Number.isFinite(started)) return null;
+  const total = Math.max(0, Math.floor((now - started) / 1000));
+  const seconds = total % 60;
+  if (total < 60) return `已运行 ${seconds} 秒`;
+  const minutes = Math.floor(total / 60) % 60;
+  if (total < 3600) return `已运行 ${minutes} 分 ${seconds} 秒`;
+  return `已运行 ${Math.floor(total / 3600)} 小时 ${minutes} 分 ${seconds} 秒`;
+}
+
+function renderLiveElapsed() {
+  const active = state.active;
+  const run = active?.live;
+  const start = active?.liveStart;
+  const running = !active?.project.demo && run?.status === "running" && start
+    && start.projectId === active.project.id && start.runId === run.id
+    && start.phase === run.phase && start.round === run.round;
+  const text = running ? elapsedText(start.startedAt) : null;
+  const label = byId("live-elapsed");
+  label.hidden = text === null;
+  label.textContent = text ?? "";
+}
+
 function renderLive() {
   const active = state.active;
   const strip = byId("live-strip");
   strip.hidden = !active || active.project.demo;
-  if (strip.hidden) return;
+  if (strip.hidden) {
+    renderLiveElapsed();
+    return;
+  }
   const run = active.live;
   const status = byId("live-status");
   status.textContent = run ? liveLabels[run.status] : "未开始";
@@ -271,6 +318,7 @@ function renderLive() {
     if (current) item.setAttribute("aria-current", "step");
     return item;
   }));
+  renderLiveElapsed();
 }
 
 async function openRunDialog(retryReview = false) {
@@ -391,22 +439,26 @@ async function refreshEvents() {
   if (!active || active.refreshing) return;
   active.refreshing = true;
   try {
+    const events = [];
+    let after = active.cursor;
     let data;
     do {
-      data = await api(`/api/projects/${active.project.id}/events?after=${active.cursor}`);
+      data = await api(`/api/projects/${active.project.id}/events?after=${after}`);
       if (state.active !== active) return;
-      active.cursor = data.cursor;
-      for (const event of data.events) {
-        if (event.kind === "message.added") active.messages.push(event);
-        if (event.kind === "demo.changed") active.run = event.data;
-        if (event.kind === "live.changed") active.live = event.data;
-        if (event.kind === "artifact.created") active.artifacts.set(event.data.path, event.data);
-      }
-      if (data.events.length) {
-        renderProject();
-        if (byId("artifact-dialog").open) renderArtifacts();
-      }
+      after = data.cursor;
+      events.push(...data.events);
     } while (data.events.length === 200);
+    active.cursor = after;
+    for (const event of events) {
+      if (event.kind === "message.added") active.messages.push(event);
+      if (event.kind === "demo.changed") active.run = event.data;
+      if (event.kind === "live.changed") applyLiveChanged(active, event);
+      if (event.kind === "artifact.created") active.artifacts.set(event.data.path, event.data);
+    }
+    if (events.length) {
+      renderProject();
+      if (byId("artifact-dialog").open) renderArtifacts();
+    }
     if (active.offline) note("");
     active.offline = false;
   } catch {
@@ -426,7 +478,7 @@ function selectProject(id) {
   if (contextDialog.open) contextDialog.close();
   if (runDialog.open) runDialog.close();
   state.active = selected ? {
-    project: selected, messages: [], cursor: 0, artifacts: new Map(),
+    project: selected, messages: [], cursor: 0, artifacts: new Map(), liveStart: null,
     disclosures: { left: new Map(), right: new Map() },
   } : null;
   state.mobileSide = null;
@@ -596,6 +648,7 @@ async function boot() {
   const previous = loadPreference("workbench.active", null);
   selectProject(state.projects.some(({ id }) => id === previous) ? previous : state.projects[0]?.id ?? "");
   setInterval(refreshEvents, 750);
+  setInterval(renderLiveElapsed, 1000);
   compact.addEventListener("change", updateLayout);
   projectSelector.addEventListener("change", () => selectProject(projectSelector.value));
 
@@ -671,9 +724,8 @@ async function boot() {
         body.source = byId("run-source").value;
         body.local_coordinator = byId("run-local").checked;
       }
-      const run = await api("/api/projects/" + active.project.id + "/run", body);
+      await api("/api/projects/" + active.project.id + "/run", body);
       if (state.active === active) {
-        active.live = run;
         runDialog.close();
         renderProject();
         await refreshEvents();
