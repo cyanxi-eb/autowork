@@ -107,6 +107,24 @@ class LiveRunTest(TestCase):
             self.assertEqual(self.advance(live, project)["status"], "interrupted")
             self.assertEqual(runtimes.calls, [])
 
+    def test_restarts_read_only_review_against_the_same_candidate(self):
+        with fixture() as (source, store, project, runtimes):
+            live = LiveRuns(store, Connections(store), runtimes)
+            live.start(project, str(source), "Revision 2", local_coordinator=True)
+            for _ in range(4):
+                prepared = self.advance(live, project)
+            self.assertEqual(prepared["phase"], "review")
+            with store.connection() as db:
+                live.save(db, prepared, "running", "Review dispatched")
+            interrupted = self.advance(live, project)
+            self.assertEqual(interrupted["status"], "interrupted")
+            retry = live.retry_review(project)
+            self.assertEqual((retry["candidate"], retry["round"]), (prepared["candidate"], prepared["round"]))
+            returned = self.advance(live, project)
+            self.assertEqual((returned["phase"], returned["round"]), ("repair", 2))
+            self.assertEqual(runtimes.calls.count(("implement", None)), 1)
+            self.assertEqual(runtimes.calls[-1], ("review", None))
+
     def test_http_starts_run_and_replays_delivery_after_refresh(self):
         with fixture() as (source, store, project, runtimes):
             with running_server(store.root, runtimes=runtimes) as url:

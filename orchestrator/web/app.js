@@ -254,6 +254,7 @@ function renderLive() {
   launch.hidden = ["queued", "running", "waiting_input"].includes(run?.status);
   launch.textContent = run ? "开始新运行" : "开始运行";
   byId("live-cancel").hidden = run?.status !== "waiting_input";
+  byId("live-retry-review").hidden = run?.status !== "interrupted" || run.phase !== "review" || !run.candidate;
   const artifacts = byId("live-artifacts");
   artifacts.disabled = !active.artifacts.size;
   artifacts.textContent = "交付物 " + active.artifacts.size;
@@ -628,15 +629,21 @@ async function boot() {
   }
   byId("run-project").addEventListener("click", openRunDialog);
   byId("cancel-run").addEventListener("click", () => runDialog.close());
-  byId("live-cancel").addEventListener("click", async () => {
-    const active = state.active;
-    try {
-      await api("/api/projects/" + active.project.id + "/run", { action: "cancel_waiting" });
-      if (state.active === active) await refreshEvents();
-    } catch (error) {
-      if (state.active === active) note(error.message);
-    }
-  });
+  for (const [id, action] of [["live-cancel", "cancel_waiting"], ["live-retry-review", "retry_review"]]) {
+    byId(id).addEventListener("click", async (event) => {
+      const active = state.active;
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await api("/api/projects/" + active.project.id + "/run", { action });
+        if (state.active === active) await refreshEvents();
+      } catch (error) {
+        if (state.active === active) note(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
   byId("run-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const active = state.active;

@@ -107,6 +107,21 @@ class LiveRuns:
         self.store.sync_files(project_id)
         return self.view(run)
 
+    def retry_review(self, project_id):
+        self.store.get_project(project_id)
+        connection = self.connections.get("codex")
+        if not connection["available"]:
+            raise ValueError("请先配置 Codex CLI。")
+        with self.store.write_lock, self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = self.latest(db, project_id)
+            if not run or run["status"] != "interrupted" or run["phase"] != "review" or not run["candidate"]:
+                raise RunConflict("只有已固定候选且中断的复核可以重试。")
+            run["settings"]["codex"] = connection["settings"]
+            run["sessions"].pop("review", None)
+            self.save(db, run, "queued", "已排入一次只读复核，继续使用原候选提交。")
+        return self.view(run)
+
     @staticmethod
     def latest(db, project_id):
         row = db.execute("SELECT state FROM live_runs WHERE project_id = ? ORDER BY rowid DESC LIMIT 1", (project_id,)).fetchone()
@@ -154,7 +169,10 @@ class LiveRuns:
             row = db.execute("SELECT state FROM live_runs WHERE id = ?", (run_id,)).fetchone()
             run = json.loads(row["state"])
             if run["status"] == "running":
-                self.save(db, run, "interrupted", "上次执行结果待核实。候选副本已保留，请检查后再从源仓库启动新运行。")
+                detail = "上次执行结果待核实。候选副本已保留，请检查后再从源仓库启动新运行。"
+                if run["phase"] == "review" and run["candidate"]:
+                    detail = "上次复核结果待核实。候选提交已保留，可以发起一次新的只读复核。"
+                self.save(db, run, "interrupted", detail)
             elif run["status"] == "queued":
                 run["task_id"] = uuid4().hex
                 self.save(db, run, "running", f"{PHASES[run['phase']][1]}正在执行。")

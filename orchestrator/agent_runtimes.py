@@ -132,7 +132,7 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def dsh_options(settings, session, write, folder):
+def dsh_options(settings, session, writable_workspace, folder):
     options = ["--profile", "headless"]
     provider = settings.get("provider", "")
     key_available = bool(os.environ.get("DEEPSEEK_API_KEY"))
@@ -149,7 +149,10 @@ def dsh_options(settings, session, write, folder):
         overlay = folder / "headless.yml"
         overlay.write_text(json.dumps(rows), encoding="utf-8")
         options += ["--patch", str(overlay)]
-    options += ["--json", "--permission-mode", "workspace-write" if write else "read-only", "--approval-policy", "never"]
+    options += ["--json", "--permission-mode", "workspace-write" if writable_workspace else "read-only",
+                "--approval-policy", "never"]
+    if writable_workspace:
+        options += ["--add-dir", str(writable_workspace)]
     if session:
         options += ["--session-id", session]
     return options
@@ -174,7 +177,7 @@ class AgentRuntimes:
         write = task["phase"] in ("implement", "repair")
         with TemporaryDirectory(prefix="agent-", dir=self.connections.store.root) as temporary:
             if agent == "dsh":
-                options = dsh_options(settings, session, write, Path(temporary))
+                options = dsh_options(settings, session, cwd if write else None, Path(temporary))
             else:
                 schema = Path(temporary) / "result.json"
                 schema.write_text(json.dumps(output_schema(task["phase"])), encoding="utf-8")
