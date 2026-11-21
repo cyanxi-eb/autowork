@@ -31,7 +31,7 @@ New-Item -ItemType Directory -Path $web -Force | Out-Null
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $project 'orchestrator') -File -Filter '*.py') {
     Copy-Item -LiteralPath $file.FullName -Destination $backend
 }
-foreach ($name in @('index.html', 'app.js', 'style.css')) {
+foreach ($name in @('index.html', 'app.js', 'markdown.js', 'style.css')) {
     Copy-Item -LiteralPath (Join-Path $project "orchestrator\web\$name") -Destination $web
 }
 foreach ($agent in @('deepseek', 'dsh', 'codex')) {
